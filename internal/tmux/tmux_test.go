@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -88,5 +89,48 @@ func TestListSkipsMalformedLines(t *testing.T) {
 	got := parseList("garbage\n" + good + "\n\n")
 	if len(got) != 1 {
 		t.Fatalf("parsed %d sessions, want only the well-formed one", len(got))
+	}
+}
+
+// OpenTab is the one call site that goes through a shell rather than exec, so
+// its arguments have to survive word splitting. A macOS home directory with a
+// space in it — "/Users/First Last" — would otherwise break the -f path in two
+// and the tab would open to a failed attach.
+func TestAttachShellCommandQuotesArguments(t *testing.T) {
+	t.Setenv("HOME", "/Users/First Last")
+
+	got := attachShellCommand("cl-work-api-gateway-aaaaaaaa")
+	want := "tmux '-u' '-L' 'orbit' '-f' '/Users/First Last/.config/orbit/tmux.conf' 'attach' '-t' 'cl-work-api-gateway-aaaaaaaa'"
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+
+	// Round-trip through a real shell: the argv the command produces must match
+	// the argv exec would have passed.
+	out, err := exec.Command("sh", "-c", strings.Replace(got, "tmux ", "printf '%s\\n' ", 1)).Output()
+	if err != nil {
+		t.Fatalf("shell rejected the command: %v", err)
+	}
+	argv := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	wantArgv := Args("attach", "-t", "cl-work-api-gateway-aaaaaaaa")
+	if len(argv) != len(wantArgv) {
+		t.Fatalf("shell split into %d args, want %d: %q", len(argv), len(wantArgv), argv)
+	}
+	for i := range argv {
+		if argv[i] != wantArgv[i] {
+			t.Errorf("arg %d = %q, want %q", i, argv[i], wantArgv[i])
+		}
+	}
+}
+
+func TestShellQuoteHandlesQuotes(t *testing.T) {
+	for _, s := range []string{"plain", "with space", "it's", `a"b`, `back\slash`, "$HOME", "`cmd`"} {
+		out, err := exec.Command("sh", "-c", "printf '%s' "+shellQuote(s)).Output()
+		if err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+		if string(out) != s {
+			t.Errorf("%q round-tripped as %q", s, out)
+		}
 	}
 }

@@ -193,7 +193,7 @@ func Retitle(name, title string) {
 // (+new-window is Linux-only), so this is the only route that doesn't spawn a
 // detached window. Needs Accessibility permission for the terminal.
 func OpenTab(name string) error {
-	attach := "tmux " + strings.Join(Args("attach", "-t", name), " ")
+	attach := attachShellCommand(name)
 	wait := Delay("ORBIT_TAB_DELAY", time.Second).Seconds()
 	script := fmt.Sprintf(`
 tell application "Ghostty" to activate
@@ -216,6 +216,28 @@ func OpenWindow(name, cwd string) error {
 	}
 	args := append([]string{"--working-directory=" + cwd, "-e", "tmux"}, Args("attach", "-t", name)...)
 	return exec.Command("ghostty", args...).Start()
+}
+
+// attachShellCommand is the attach line OpenTab types at Ghostty's shell.
+//
+// Unlike every other call site this one goes through a shell rather than
+// exec, so each argument is quoted: ConfPath() sits under the home directory,
+// and a macOS account named "First Last" would otherwise split the -f path
+// across two argv entries and fail to attach.
+func attachShellCommand(name string) string {
+	args := Args("attach", "-t", name)
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shellQuote(a)
+	}
+	return "tmux " + strings.Join(quoted, " ")
+}
+
+// shellQuote wraps s in single quotes, which the shell takes literally. The
+// only character needing care is a single quote itself: close the string,
+// emit an escaped quote, reopen.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func applescriptString(s string) string {
