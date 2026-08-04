@@ -27,6 +27,7 @@ func main() {
 	noNotify := flag.Bool("no-notify", false, "don't send desktop notifications when a session wants you")
 	list := flag.Bool("list", false, "print the session index as plain text and exit")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	probe := flag.Bool("probe-logos", false, "render the agent logos to check terminal support")
 	flag.Parse()
 
 	if *showVersion {
@@ -36,6 +37,13 @@ func main() {
 
 	if *list {
 		listSessions()
+		return
+	}
+	if *probe {
+		if err := ProbeLogos(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "orbit:", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -57,6 +65,14 @@ func main() {
 	}
 
 	m := newModel(mode)
+	if m.icons == IconLogo {
+		// Upload once, before the alt screen: images live on the terminal side
+		// keyed by id, so every later frame just references them.
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			TransmitLogos(tty)
+			tty.Close()
+		}
+	}
 	m.notify = NewNotifier(!*noNotify)
 	defer m.notify.Close()
 

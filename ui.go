@@ -86,6 +86,7 @@ type model struct {
 	status      string
 	statusUntil time.Time
 	mode        attachMode
+	icons       IconMode
 	notify      *Notifier
 }
 
@@ -96,7 +97,7 @@ func newModel(mode attachMode) *model {
 	ti.CharLimit = 60
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(cBright)
-	return &model{ix: NewIndex(), filter: ti, spin: sp, mode: mode}
+	return &model{ix: NewIndex(), filter: ti, spin: sp, mode: mode, icons: ResolveIconMode()}
 }
 
 func (m *model) Init() tea.Cmd {

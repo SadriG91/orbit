@@ -191,10 +191,29 @@ func (m *model) header() string {
 			Padding(0, 1).Render("nothing running"))
 	}
 
+	// Spell the mapping out: the two-letter tags in the list are only obvious
+	// once you've been told what they stand for.
+	perAgent := map[Agent]int{}
+	for _, s := range m.all {
+		perAgent[s.Agent]++
+	}
+	var legend []string
+	for _, a := range AllAgents {
+		if perAgent[a] == 0 {
+			continue
+		}
+		mark := agentStyle(a).Bold(true).Render(a.Tag())
+		if m.icons == IconLogo {
+			mark = LogoCells(a, "")
+		}
+		legend = append(legend, mark+" "+tagline.Render(a.String()+" "+itoa(perAgent[a])))
+	}
+
 	art := banner(m.w, m.h)
 	stats := []string{
 		strings.Join(pills, " "),
-		tagline.Render(itoa(len(m.view)) + " of " + itoa(len(m.all)) + " sessions · claude · codex · copilot"),
+		tagline.Render(itoa(len(m.view))+" of "+itoa(len(m.all))+" shown") +
+			tagline.Render("  ·  ") + strings.Join(legend, tagline.Render(" · ")),
 	}
 	if m.filtering || m.filter.Value() != "" {
 		stats = append(stats, m.filter.View())
@@ -268,9 +287,19 @@ func (m *model) row(s *Session, sel bool, w int) []string {
 	if s.State == Working {
 		icon = m.spin.View() // a still dot reads as stalled; motion reads as busy
 	}
+	// In logo mode the agent cell is raw escape codes: the foreground colour
+	// encodes the Kitty image id, so lipgloss must not restyle it.
+	tag := paint(agentStyle(s.Agent), s.Agent.Tag())
+	if m.icons == IconLogo {
+		selBG := ""
+		if sel {
+			selBG = "\x1b[48;5;236m"
+		}
+		tag = LogoCells(s.Agent, selBG)
+	}
 	line1 := bar +
 		paint(stateStyle(s.State), icon) + base.Render(" ") +
-		paint(agentStyle(s.Agent), s.Agent.Tag()) + base.Render(" ") +
+		tag + base.Render(" ") +
 		paint(sMid, cwd) + base.Render(" ") + paint(sDim, when)
 
 	label := s.State.Label()

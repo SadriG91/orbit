@@ -129,6 +129,27 @@ spawning a detached one. It needs Accessibility permission; without it, use `i`.
 |---------------------|---------|-------------------------------------------|
 | `ORBIT_SPAWN_DELAY` | `900ms` | wait before typing into a new tmux pane    |
 | `ORBIT_TAB_DELAY`   | `1s`    | wait before typing into a new Ghostty tab  |
+| `ORBIT_ICONS`       | `text`  | `logo` for real brand marks, `auto` to use them where supported |
+
+### Agent logos
+
+Sessions are tagged `cl` / `cx` / `cp` by default, which works in any terminal.
+Set `ORBIT_ICONS=logo` and orbit renders the actual Claude, OpenAI and Copilot
+marks instead, as images, via the Kitty graphics protocol — supported by Ghostty
+and Kitty. Check yours first:
+
+```sh
+orbit --probe-logos
+```
+
+The marks are transmitted once at startup and placed with Unicode placeholders,
+so they flow with the text rather than being pinned to screen coordinates, and
+occupy exactly the two columns the text tag did. tmux doesn't pass placeholders
+through, so logos switch themselves off if orbit is running inside one.
+
+Artwork is from [Simple Icons](https://simpleicons.org) (CC0), recoloured for a
+dark terminal. Trademarks belong to their respective owners; the marks identify
+which agent owns a session and imply no affiliation or endorsement.
 
 Flags: `--inline`, `--window`, `--no-notify`, `--list`, `--version`.
 

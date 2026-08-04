@@ -59,6 +59,31 @@ func (a Agent) Installed() bool {
 	return err == nil
 }
 
+// IconMode picks how an agent is identified in the list.
+type IconMode int
+
+const (
+	IconText IconMode = iota // cl / cx / cp — works in any terminal
+	IconLogo                 // the real brand marks, via Kitty graphics
+)
+
+// ResolveIconMode honours ORBIT_ICONS, defaulting to text: logos need a
+// terminal that composites Kitty graphics, and a wrong guess renders mojibake
+// rather than degrading quietly.
+func ResolveIconMode() IconMode {
+	switch os.Getenv("ORBIT_ICONS") {
+	case "logo":
+		if LogosSupported() {
+			return IconLogo
+		}
+	case "auto":
+		if LogosSupported() {
+			return IconLogo
+		}
+	}
+	return IconText
+}
+
 // Hint is what a transcript says about where the session stopped, before
 // tmux tells us whether the process is actually alive.
 type Hint int
