@@ -26,16 +26,16 @@ jobs:
       id-token: write # sign the provenance attestation
       attestations: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # changelog needs the history
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache: true
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --clean
@@ -47,7 +47,11 @@ jobs:
       # Lets anyone verify a downloaded archive was built by this workflow from
       # this commit: `gh attestation verify <file> --repo SadriG91/orbit`.
       # Worth having for binaries strangers are asked to trust.
-      - uses: actions/attest-build-provenance@v2
+      #
+      # From v4 this is a thin wrapper over actions/attest, which GitHub now
+      # points new setups at directly. Kept as-is: same inputs, and the name
+      # says which of the several attestation kinds this is.
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*.tar.gz
 
