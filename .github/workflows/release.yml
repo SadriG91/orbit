@@ -51,23 +51,32 @@ jobs:
         with:
           subject-path: dist/*.tar.gz
 
-      # GoReleaser's generated cask trips brew's RuboCop rules — stanza
-      # grouping and array indentation — which turns the tap's own CI red on
-      # every single release. The offences are all autocorrectable, so correct
-      # them rather than leaving a permanently failing check nobody reads.
-      - name: tidy the generated cask
+      # GoReleaser generates the cask but doesn't push it (skip_upload): its
+      # Ruby trips brew's RuboCop rules — stanza grouping, array indentation —
+      # and pushing it raw turned the tap's CI red on every release, with a
+      # style-fix commit chasing it seconds later. Styling the file from dist/
+      # first means the tap only ever sees one commit, already green. The fix
+      # is best-effort on purpose: a new, non-autocorrectable offence should
+      # show up as a red audit on the tap, not as a release that never
+      # published its cask.
+      - name: publish the cask
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
+          cask=$(find dist -name 'orbit.rb' -print -quit)
+          test -n "$cask" || { echo "no cask in dist/"; exit 1; }
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/SadriG91/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp "$cask" tap/Casks/orbit.rb
           cd tap
           brew style --fix Casks/orbit.rb || true
-          if git diff --quiet; then
-            echo "cask already style-clean"
+          git add Casks/orbit.rb
+          if git diff --cached --quiet; then
+            echo "cask unchanged"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Style-fix the generated orbit cask"
+          git commit -m "Brew cask update for orbit ${GITHUB_REF_NAME}"
           git push

@@ -56,6 +56,11 @@ changelog:
 
 homebrew_casks:
   - name: orbit
+    # Generated but not pushed: GoReleaser's Ruby trips brew's RuboCop rules,
+    # and pushing it raw turned the tap's CI red on every release until the
+    # style-fix commit landed seconds later. The workflow styles the file from
+    # dist/ and pushes it in one green commit instead.
+    skip_upload: true
     repository:
       owner: SadriG91
       name: homebrew-tap
