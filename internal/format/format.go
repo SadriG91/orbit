@@ -1,12 +1,14 @@
-package main
+package format
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
 )
 
-func firstLine(s string) string {
+func FirstLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
@@ -14,7 +16,7 @@ func firstLine(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func truncate(s string, n int) string {
+func Truncate(s string, n int) string {
 	if n <= 1 {
 		return ""
 	}
@@ -25,7 +27,7 @@ func truncate(s string, n int) string {
 	return strings.TrimRight(string(r[:n-1]), " ") + "…"
 }
 
-func pad(s string, n int) string {
+func Pad(s string, n int) string {
 	r := []rune(s)
 	if len(r) >= n {
 		return string(r[:n])
@@ -33,7 +35,7 @@ func pad(s string, n int) string {
 	return s + strings.Repeat(" ", n-len(r))
 }
 
-func relTime(t time.Time) string {
+func RelTime(t time.Time) string {
 	if t.IsZero() {
 		return "—"
 	}
@@ -42,16 +44,16 @@ func relTime(t time.Time) string {
 	case d < time.Minute:
 		return "now"
 	case d < time.Hour:
-		return itoa(int(d.Minutes())) + "m"
+		return Itoa(int(d.Minutes())) + "m"
 	case d < 24*time.Hour:
-		return itoa(int(d.Hours())) + "h"
+		return Itoa(int(d.Hours())) + "h"
 	case d < 365*24*time.Hour:
-		return itoa(int(d.Hours()/24)) + "d"
+		return Itoa(int(d.Hours()/24)) + "d"
 	}
-	return itoa(int(d.Hours()/24/365)) + "y"
+	return Itoa(int(d.Hours()/24/365)) + "y"
 }
 
-func itoa(n int) string {
+func Itoa(n int) string {
 	if n == 0 {
 		return "0"
 	}
@@ -63,31 +65,31 @@ func itoa(n int) string {
 	return string(b)
 }
 
-// humanTokens keeps the column narrow: these run to hundreds of millions once
+// HumanTokens keeps the column narrow: these run to hundreds of millions once
 // cache reads are counted, and the exact figure never matters at a glance.
-func humanTokens(n int64) string {
+func HumanTokens(n int64) string {
 	switch {
 	case n <= 0:
 		return ""
 	case n < 1000:
-		return itoa(int(n))
+		return Itoa(int(n))
 	case n < 1_000_000:
-		return itoa(int(n/1000)) + "k"
+		return Itoa(int(n/1000)) + "k"
 	case n < 100_000_000:
 		v := float64(n) / 1_000_000
 		whole := int(v)
 		frac := int((v - float64(whole)) * 10)
 		if whole < 10 && frac > 0 {
-			return itoa(whole) + "." + itoa(frac) + "M"
+			return Itoa(whole) + "." + Itoa(frac) + "M"
 		}
-		return itoa(whole) + "M"
+		return Itoa(whole) + "M"
 	}
-	return itoa(int(n/1_000_000)) + "M"
+	return Itoa(int(n/1_000_000)) + "M"
 }
 
-// clean strips control characters that would corrupt the layout when echoing
+// Clean strips control characters that would corrupt the layout when echoing
 // captured pane output or a pasted prompt back into the UI.
-func clean(s string) string {
+func Clean(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\t' {
 			return ' '
@@ -97,4 +99,11 @@ func clean(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// Home joins a path under the user's home directory. Every package needs it and
+// none of them should be reaching for os.UserHomeDir individually.
+func Home(rest ...string) string {
+	h, _ := os.UserHomeDir()
+	return filepath.Join(append([]string{h}, rest...)...)
 }

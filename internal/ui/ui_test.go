@@ -1,41 +1,43 @@
-package main
+package ui
 
 import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/config"
+	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/session"
+	"github.com/sadrig91/orbit/internal/tmux"
 )
 
 // Renders the full UI against synthetic sessions in every state, so layout
 // regressions show up without needing a terminal.
 func TestViewRenders(t *testing.T) {
 	now := time.Now()
-	m := newModel(testConfig(), attachInline)
+	m := newTestModel(testConfig(), attachInline)
 	m.w, m.h = 120, 30
-	m.all = []*Session{
-		{Agent: Claude, ID: "aaaaaaaa-1", Cwd: home("work", "api-gateway"), Branch: "batch-runner",
+	m.all = []*session.Session{
+		{Agent: session.Claude, ID: "aaaaaaaa-1", Cwd: format.Home("work", "api-gateway"), Branch: "batch-runner",
 			Title: "Refactor batch runner", Last: "now run the tests", Msgs: 46, Modified: now.Add(-2 * time.Minute),
-			hint: HintMaybeApproval, Tmux: &Tmux{Name: "cl-work-api-gateway-aaaaaaaa", AgentRunning: true}},
-		{Agent: Codex, ID: "bbbbbbbb-2", Cwd: home("src", "widgets"), Branch: "main",
+			State: session.NeedsApproval, Tmux: &tmux.Session{Name: "cl-work-api-gateway-aaaaaaaa", AgentRunning: true}},
+		{Agent: session.Codex, ID: "bbbbbbbb-2", Cwd: format.Home("src", "widgets"), Branch: "main",
 			Title: "what other improvements can we bring to this project?", Msgs: 12, Modified: now.Add(-40 * time.Minute),
-			hint: HintDone, Tmux: &Tmux{Name: "cx-src-widgets-bbbbbbbb", AgentRunning: true}},
-		{Agent: Copilot, ID: "cccccccc-3", Cwd: home("work", "docs-site"),
-			Title: "Integrate GitHub Copilot in Actions", Msgs: 8, Modified: now.Add(-72 * time.Hour)},
-		{Agent: Claude, ID: "dddddddd-4", Cwd: home(), Title: "Investigate slow terminal startup time",
+			State: session.YourTurn, Tmux: &tmux.Session{Name: "cx-src-widgets-bbbbbbbb", AgentRunning: true}},
+		{Agent: session.Copilot, ID: "cccccccc-3", Cwd: format.Home("work", "docs-site"),
+			Title: "Integrate GitHub session.Copilot in Actions", Msgs: 8, Modified: now.Add(-72 * time.Hour)},
+		{Agent: session.Claude, ID: "dddddddd-4", Cwd: format.Home(), Title: "Investigate slow terminal startup time",
 			Last: "no its fine we leave that as is", Msgs: 90, Modified: now.Add(-3 * time.Hour)},
 	}
-	for _, s := range m.all {
-		s.resolve(now)
-	}
-	sortSessions(m.all)
+	session.SortSessions(m.all)
 	m.rebuild()
 
 	if len(m.view) != 4 {
 		t.Fatalf("expected 4 visible sessions, got %d", len(m.view))
 	}
 	// Highest-priority state sorts first.
-	if got := m.view[0].State; got != NeedsApproval {
-		t.Errorf("expected NeedsApproval first, got %v", got)
+	if got := m.view[0].State; got != session.NeedsApproval {
+		t.Errorf("expected session.NeedsApproval first, got %v", got)
 	}
 
 	out := m.render()
@@ -59,11 +61,11 @@ func TestViewRenders(t *testing.T) {
 
 func TestFilterAndDetail(t *testing.T) {
 	now := time.Now()
-	m := newModel(testConfig(), attachInline)
+	m := newTestModel(testConfig(), attachInline)
 	m.w, m.h = 120, 30
-	m.all = []*Session{
-		{Agent: Claude, ID: "a", Cwd: home("work", "api-gateway"), Title: "Refactor batch runner", Modified: now},
-		{Agent: Codex, ID: "b", Cwd: home("src", "widgets"), Title: "Tune widget layout", Modified: now},
+	m.all = []*session.Session{
+		{Agent: session.Claude, ID: "a", Cwd: format.Home("work", "api-gateway"), Title: "Refactor batch runner", Modified: now},
+		{Agent: session.Codex, ID: "b", Cwd: format.Home("src", "widgets"), Title: "Tune widget layout", Modified: now},
 	}
 	m.rebuild()
 	m.filter.SetValue("widgets")
@@ -77,10 +79,10 @@ func TestFilterAndDetail(t *testing.T) {
 }
 
 func TestOldUntitledHiddenUntilShowAll(t *testing.T) {
-	m := newModel(testConfig(), attachInline)
+	m := newTestModel(testConfig(), attachInline)
 	m.w, m.h = 120, 30
-	m.all = []*Session{
-		{Agent: Claude, ID: "old", Cwd: home(), Title: "", Modified: time.Now().AddDate(0, 0, -60)},
+	m.all = []*session.Session{
+		{Agent: session.Claude, ID: "old", Cwd: format.Home(), Title: "", Modified: time.Now().AddDate(0, 0, -60)},
 	}
 	m.rebuild()
 	if len(m.view) != 0 {
@@ -96,7 +98,7 @@ func TestOldUntitledHiddenUntilShowAll(t *testing.T) {
 // assertFrame checks the frame fills its terminal exactly and that no row got
 // wrapped. Width alone isn't enough: wrapping makes lines shorter, not wider,
 // so it slips past a max-width check — pin the row content to one line instead.
-func assertFrame(t *testing.T, m *model, frame string) {
+func assertFrame(t *testing.T, m *Model, frame string) {
 	t.Helper()
 	lines := strings.Split(frame, "\n")
 	for i, line := range lines {
@@ -120,8 +122,8 @@ func assertFrame(t *testing.T, m *model, frame string) {
 }
 
 // testConfig is the shipped default, so the tests exercise what users get.
-func testConfig() Config {
-	cfg, err := LoadConfigDefaults()
+func testConfig() config.Config {
+	cfg, err := config.LoadDefaults()
 	if err != nil {
 		panic(err)
 	}
@@ -143,3 +145,6 @@ func stripANSI(s string) string {
 	}
 	return b.String()
 }
+
+// newTestModel builds a Model straight from a config, bypassing flag handling.
+func newTestModel(cfg config.Config, _ attachMode) *Model { return New(cfg, "inline") }

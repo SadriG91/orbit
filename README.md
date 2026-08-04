@@ -179,6 +179,31 @@ spawning a detached one. It needs Accessibility permission; without it, use `i`.
 
 **Notifications** use OSC 9 when a session flips to "needs you" or "your turn".
 
+## Layout
+
+```
+cmd/orbit/          entry point: flags, wiring, --list/--json output
+internal/
+  config/           config.toml and its defaults
+  format/           shared string and time helpers
+  session/          the session model: agents, parsers, index, sorting
+  tmux/             the private tmux server; knows nothing about agents
+  search/           full-text search over transcript bodies
+  summary/          cached, incrementally-updated summaries
+  ui/               Bubble Tea model, rendering, logos, notifications
+test/               integration tests that touch the real system
+```
+
+Dependencies run one way: `format` and `config` sit at the bottom and import
+nothing local, `tmux` is deliberately ignorant of agents (it deals in names and
+strings), `session` is the domain model, and `ui` composes the lot. Anything
+needing both an agent and tmux — resuming a session, starting a new one — lives
+in `ui`, which is the only layer entitled to know about both.
+
+Unit tests sit beside the code they cover, as Go expects, so they can reach
+unexported internals. `test/` is for integration tests that spawn a real tmux
+server or read the actual session stores.
+
 ## Caveats
 
 - tmux owns the scrollback, so your terminal's find-in-page only searches the

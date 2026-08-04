@@ -1,12 +1,14 @@
-package main
+package search
 
 import (
 	"bufio"
-	"encoding/json"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/session"
 )
 
 // Full-text search over transcript bodies. Titles are terse — "Check branch
@@ -21,9 +23,9 @@ type Match struct {
 	Hits      int
 }
 
-// SearchTranscripts scans every session's body for q, returning the sessions
+// Transcripts scans every session's body for q, returning the sessions
 // that matched with a snippet of the first hit.
-func SearchTranscripts(sessions []*Session, q string) map[string]Match {
+func Transcripts(sessions []*session.Session, q string) map[string]Match {
 	q = strings.TrimSpace(strings.ToLower(q))
 	res := map[string]Match{}
 	if len(q) < 2 {
@@ -39,7 +41,7 @@ func SearchTranscripts(sessions []*Session, q string) map[string]Match {
 			continue // copilot lives in sqlite; handled below
 		}
 		wg.Add(1)
-		go func(s *Session) {
+		go func(s *session.Session) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -83,7 +85,7 @@ func scanTranscript(path, q string) (Match, bool) {
 		if !containsFold(line, q) {
 			continue
 		}
-		text := recordText(line)
+		text := session.RecordText(line)
 		if text == "" {
 			continue
 		}
@@ -104,50 +106,8 @@ func containsFold(b []byte, lower string) bool {
 	return strings.Contains(strings.ToLower(string(b)), lower)
 }
 
-// recordText pulls the human-readable text out of a transcript record, for
-// both Claude's message blocks and Codex's event payloads.
-func recordText(line []byte) string {
-	var r struct {
-		Message *struct {
-			Content json.RawMessage `json:"content"`
-		} `json:"message"`
-		Payload *struct {
-			Message string `json:"message"`
-		} `json:"payload"`
-	}
-	if json.Unmarshal(line, &r) != nil {
-		return ""
-	}
-	if r.Payload != nil && r.Payload.Message != "" {
-		return r.Payload.Message
-	}
-	if r.Message == nil || len(r.Message.Content) == 0 {
-		return ""
-	}
-	if r.Message.Content[0] == '"' {
-		var s string
-		json.Unmarshal(r.Message.Content, &s)
-		return s
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(r.Message.Content, &blocks) != nil {
-		return ""
-	}
-	var sb strings.Builder
-	for _, b := range blocks {
-		if b.Text != "" {
-			sb.WriteString(b.Text)
-			sb.WriteByte(' ')
-		}
-	}
-	return sb.String()
-}
-
 func snippetAround(text string, i int) string {
-	text = clean(text)
+	text = format.Clean(text)
 	if i > len(text) {
 		i = 0
 	}

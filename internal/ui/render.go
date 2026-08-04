@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"image/color"
@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/session"
 
 	"charm.land/lipgloss/v2"
 )
@@ -72,7 +74,7 @@ func banner(width, height int) []string {
 		return []string{sTitle.Render("orbit")}
 	}
 	out := make([]string, len(art))
-	// Index the fade against the full ramp so the small banner still fades.
+	// session.Index the fade against the full ramp so the small banner still fades.
 	for i, line := range art {
 		c := bannerFade[i*len(bannerFade)/len(art)]
 		out[i] = lipgloss.NewStyle().Foreground(c).Render(line)
@@ -80,7 +82,7 @@ func banner(width, height int) []string {
 	return out
 }
 
-func (m *model) render() string {
+func (m *Model) render() string {
 	if m.w == 0 {
 		return "starting orbit…"
 	}
@@ -129,7 +131,7 @@ func (m *model) render() string {
 // alt screen, window title, and a terminal-level progress indicator. Ghostty
 // paints that indicator on the tab itself, so a session wanting attention is
 // visible even when orbit's tab isn't the one you're looking at.
-func (m *model) View() tea.View {
+func (m *Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
 	v.WindowTitle = "orbit"
@@ -137,9 +139,9 @@ func (m *model) View() tea.View {
 	var needs, working int
 	for _, s := range m.all {
 		switch s.State {
-		case NeedsApproval, YourTurn:
+		case session.NeedsApproval, session.YourTurn:
 			needs++
-		case Working:
+		case session.Working:
 			working++
 		}
 	}
@@ -159,7 +161,7 @@ func (m *model) View() tea.View {
 // drawn by hand and the box below it renders without one.
 func titledPane(title string, lines []string, w, h int) string {
 	border := lipgloss.NewStyle().Foreground(cBorder)
-	label := " " + strings.ToUpper(truncate(title, max(4, w-8))) + " "
+	label := " " + strings.ToUpper(format.Truncate(title, max(4, w-8))) + " "
 	dashes := max(0, w-3-lipgloss.Width(label))
 	top := border.Render("╭─") + paneLabel.Render(label) + border.Render(strings.Repeat("─", dashes)+"╮")
 
@@ -167,33 +169,33 @@ func titledPane(title string, lines []string, w, h int) string {
 	return top + "\n" + box
 }
 
-func (m *model) header() string {
+func (m *Model) header() string {
 	var working, needs, turn, shell int
 	for _, s := range m.all {
 		switch s.State {
-		case Working:
+		case session.Working:
 			working++
-		case NeedsApproval:
+		case session.NeedsApproval:
 			needs++
-		case YourTurn:
+		case session.YourTurn:
 			turn++
-		case ShellOnly:
+		case session.ShellOnly:
 			shell++
 		}
 	}
 
 	var pills []string
 	if needs > 0 {
-		pills = append(pills, pill("▲", itoa(needs)+" needs you", cAmber))
+		pills = append(pills, pill("▲", format.Itoa(needs)+" needs you", cAmber))
 	}
 	if turn > 0 {
-		pills = append(pills, pill("◆", itoa(turn)+" your turn", cCyan))
+		pills = append(pills, pill("◆", format.Itoa(turn)+" your turn", cCyan))
 	}
 	if working > 0 {
-		pills = append(pills, pill("●", itoa(working)+" working", cBright))
+		pills = append(pills, pill("●", format.Itoa(working)+" working", cBright))
 	}
 	if shell > 0 {
-		pills = append(pills, pill("○", itoa(shell)+" idle", cGreen))
+		pills = append(pills, pill("○", format.Itoa(shell)+" idle", cGreen))
 	}
 
 	if len(pills) == 0 {
@@ -203,12 +205,12 @@ func (m *model) header() string {
 
 	// Spell the mapping out: the two-letter tags in the list are only obvious
 	// once you've been told what they stand for.
-	perAgent := map[Agent]int{}
+	perAgent := map[session.Agent]int{}
 	for _, s := range m.all {
 		perAgent[s.Agent]++
 	}
 	var legend []string
-	for _, a := range AllAgents {
+	for _, a := range session.AllAgents {
 		if perAgent[a] == 0 {
 			continue
 		}
@@ -216,14 +218,14 @@ func (m *model) header() string {
 		if m.icons == IconLogo {
 			mark = LogoCells(a, "")
 		}
-		legend = append(legend, mark+" "+tagline.Render(a.String()+" "+itoa(perAgent[a])))
+		legend = append(legend, mark+" "+tagline.Render(a.String()+" "+format.Itoa(perAgent[a])))
 	}
 
 	art := banner(m.w, m.h)
 	stats := []string{
 		strings.Join(pills, " "),
 		m.coverageBar(),
-		tagline.Render(itoa(len(m.view))+" of "+itoa(len(m.all))+" shown") +
+		tagline.Render(format.Itoa(len(m.view))+" of "+format.Itoa(len(m.all))+" shown") +
 			tagline.Render("  ·  ") + strings.Join(legend, tagline.Render(" · ")),
 	}
 	if m.filtering || m.filter.Value() != "" {
@@ -244,20 +246,20 @@ func (m *model) header() string {
 
 // coverageBar is the global summary progress: filled by sessions that have a
 // summary, advancing only as one completes.
-func (m *model) coverageBar() string {
+func (m *Model) coverageBar() string {
 	done, total, inflight := m.summaryCoverage()
 	if total == 0 || !m.cfg.Summary.Enabled {
 		return ""
 	}
 	m.prog.SetWidth(28)
-	label := itoa(done) + "/" + itoa(total) + " summarised"
+	label := format.Itoa(done) + "/" + format.Itoa(total) + " summarised"
 	if inflight > 0 {
-		label += sDim.Render("  ") + sTok.Render(m.spin.View()+" "+itoa(inflight)+" queued")
+		label += sDim.Render("  ") + sTok.Render(m.spin.View()+" "+format.Itoa(inflight)+" queued")
 	}
 	return m.prog.ViewAs(float64(done)/float64(total)) + "  " + tagline.Render(label)
 }
 
-func (m *model) list(w, h int) []string {
+func (m *Model) list(w, h int) []string {
 	rows := h / 2
 	if rows < 1 {
 		rows = 1
@@ -283,21 +285,21 @@ func (m *model) list(w, h int) []string {
 		if m.group {
 			if g := s.ShortCwd(); g != lastGroup {
 				lastGroup = g
-				out = append(out, sGroup.Render("▸ "+truncate(g, w-2)))
+				out = append(out, sGroup.Render("▸ "+format.Truncate(g, w-2)))
 			}
 		}
 		out = append(out, m.row(s, i == m.cursor, w)...)
 	}
 	// A scroll hint beats silently truncating the list.
 	if more := len(m.view) - (m.top + rows); more > 0 && len(out) < h {
-		out = append(out, sDim.Render("  + "+itoa(more)+" more"))
+		out = append(out, sDim.Render("  + "+format.Itoa(more)+" more"))
 	}
 	return out
 }
 
 // row renders one session as two lines. Selection is a filled background rather
 // than a marker, so the eye lands on it without hunting for a caret.
-func (m *model) row(s *Session, sel bool, w int) []string {
+func (m *Model) row(s *session.Session, sel bool, w int) []string {
 	base := lipgloss.NewStyle()
 	if sel {
 		base = base.Background(cSel)
@@ -314,11 +316,11 @@ func (m *model) row(s *Session, sel bool, w int) []string {
 		bar = sBar.Background(cSel).Render("▌") + base.Render(" ")
 	}
 
-	when := relTime(s.Modified)
+	when := format.RelTime(s.Modified)
 	headW := w - 2 - len([]rune(when)) - 1
-	cwd := pad(truncate(s.ShortCwd(), headW-5), headW-5)
+	cwd := format.Pad(format.Truncate(s.ShortCwd(), headW-5), headW-5)
 	icon := s.State.Icon()
-	if s.State == Working {
+	if s.State == session.Working {
 		icon = m.spin.View() // a still dot reads as stalled; motion reads as busy
 	}
 	// In logo mode the agent cell is raw escape codes: the foreground colour
@@ -345,14 +347,14 @@ func (m *model) row(s *Session, sel bool, w int) []string {
 	if sel {
 		nameStyle = sNameOn
 	}
-	line2 := bar + base.Render("  ") + paint(nameStyle, pad(truncate(clean(s.Name()), nameW), nameW))
+	line2 := bar + base.Render("  ") + paint(nameStyle, format.Pad(format.Truncate(format.Clean(s.Name()), nameW), nameW))
 	if label != "" {
 		line2 += base.Render(" ") + paint(stateStyle(s.State), label)
 	}
 	return []string{line1, line2}
 }
 
-func (m *model) detail(w, h int) []string {
+func (m *Model) detail(w, h int) []string {
 	s := m.sel()
 	if s == nil {
 		return nil
@@ -360,20 +362,20 @@ func (m *model) detail(w, h int) []string {
 	var out []string
 	add := func(ss ...string) { out = append(out, ss...) }
 
-	add(sNameOn.Render(truncate(clean(s.Name()), w)))
-	add(sDim.Render(truncate(s.Cwd, w)))
+	add(sNameOn.Render(format.Truncate(format.Clean(s.Name()), w)))
+	add(sDim.Render(format.Truncate(s.Cwd, w)))
 
 	meta := []string{agentStyle(s.Agent).Render(s.Agent.String())}
 	if s.Branch != "" {
-		meta = append(meta, sMid.Render(truncate(s.Branch, 24)))
+		meta = append(meta, sMid.Render(format.Truncate(s.Branch, 24)))
 	}
 	if s.Msgs > 0 {
-		meta = append(meta, sMid.Render(itoa(s.Msgs)+" msgs"))
+		meta = append(meta, sMid.Render(format.Itoa(s.Msgs)+" msgs"))
 	}
-	if t := humanTokens(s.Tokens); t != "" {
+	if t := format.HumanTokens(s.Tokens); t != "" {
 		meta = append(meta, sTok.Render(t+" tokens"))
 	}
-	meta = append(meta, sMid.Render(relTime(s.Modified)+" ago"))
+	meta = append(meta, sMid.Render(format.RelTime(s.Modified)+" ago"))
 	line := strings.Join(meta, sDim.Render(" · "))
 	if lbl := s.State.Label(); lbl != "" {
 		line += "  " + pill(s.State.Icon(), lbl, stateColor(s.State))
@@ -385,24 +387,24 @@ func (m *model) detail(w, h int) []string {
 		// Say plainly when the summary predates the latest turns, rather than
 		// presenting stale text as current.
 		if behind := rec.Behind(s); behind > 0 {
-			head += sDim.Render("  ") + sHit.Render(itoa(behind)+" msgs newer — s to update")
+			head += sDim.Render("  ") + sHit.Render(format.Itoa(behind)+" msgs newer — s to update")
 		}
 		add(head)
-		for _, l := range wrap(clean(rec.Summary), w-2) {
+		for _, l := range wrap(format.Clean(rec.Text), w-2) {
 			add("  " + sName.Render(l))
 		}
 		add("")
 	} else if elapsed, running := m.summaryElapsed(s.ID); running {
 		add(paneLabel.Render("▸ summary"))
 		add("  " + sDim.Render(m.spin.View()+" "+s.Agent.String()+" · "+
-			itoa(int(elapsed.Seconds()))+"s elapsed"))
+			format.Itoa(int(elapsed.Seconds()))+"s elapsed"))
 		add("")
 	} else if m.cfg.Summary.Enabled {
 		add(sDim.Render("press s to summarise this session"), "")
 	}
 
 	if hit, ok := m.matches[s.ID]; ok && hit.Snippet != "" {
-		add(paneLabel.Render("▸ match") + sDim.Render("  "+itoa(hit.Hits)+" hits"))
+		add(paneLabel.Render("▸ match") + sDim.Render("  "+format.Itoa(hit.Hits)+" hits"))
 		for _, l := range wrap(hit.Snippet, w-2) {
 			add("  " + sHit.Render(l))
 		}
@@ -411,7 +413,7 @@ func (m *model) detail(w, h int) []string {
 
 	if s.Last != "" {
 		add(paneLabel.Render("▸ last prompt"))
-		for _, l := range wrap(clean(s.Last), w-2) {
+		for _, l := range wrap(format.Clean(s.Last), w-2) {
 			add("  " + sName.Render(l))
 		}
 		add("")
@@ -427,30 +429,30 @@ func (m *model) detail(w, h int) []string {
 			lines = lines[len(lines)-room:]
 		}
 		for _, l := range lines {
-			add("  " + sMid.Render(truncate(clean(l), w-2)))
+			add("  " + sMid.Render(format.Truncate(format.Clean(l), w-2)))
 		}
 	} else if s.Tmux == nil {
 		add(paneLabel.Render("▸ ⏎ resumes with"))
-		add("  " + sMid.Render(truncate(s.Agent.ResumeCmd(s.ID), w-2)))
+		add("  " + sMid.Render(format.Truncate(s.Agent.ResumeCmd(s.ID), w-2)))
 		add("")
-		add(sDim.Render(truncate("transcript: "+s.Path, w)))
+		add(sDim.Render(format.Truncate("transcript: "+s.Path, w)))
 	}
 	return out
 }
 
-func stateColor(s State) color.Color {
+func stateColor(s session.State) color.Color {
 	switch s {
-	case Working:
+	case session.Working:
 		return cBright
-	case NeedsApproval:
+	case session.NeedsApproval:
 		return cAmber
-	case YourTurn:
+	case session.YourTurn:
 		return cCyan
 	}
 	return cGreen
 }
 
-func (m *model) footer() string {
+func (m *Model) footer() string {
 	if m.status != "" && time.Now().Before(m.statusUntil) {
 		st := sHead
 		if strings.Contains(m.status, "failed") || strings.Contains(m.status, "not installed") {
@@ -483,7 +485,7 @@ func (m *model) footer() string {
 
 func wrap(s string, w int) []string {
 	if w < 8 {
-		return []string{truncate(s, w)}
+		return []string{format.Truncate(s, w)}
 	}
 	var out []string
 	line := ""
@@ -498,11 +500,11 @@ func wrap(s string, w int) []string {
 			line = word
 		}
 		if len(out) == 4 {
-			return append(out, truncate(line, w))
+			return append(out, format.Truncate(line, w))
 		}
 	}
 	if line != "" {
-		out = append(out, truncate(line, w))
+		out = append(out, format.Truncate(line, w))
 	}
 	return out
 }

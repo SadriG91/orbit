@@ -1,23 +1,29 @@
-package main
+package tmux
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/format"
 )
 
 // Everything runs on a private tmux server (-L orbit) with its own config, so
 // none of this collides with a plain `tmux` you might start later.
-const socket = "orbit"
+const Socket = "orbit"
 
-type Tmux struct {
+// Session is a live tmux session. The agent is carried as a plain name: this
+// package deliberately knows nothing about agent types or transcripts.
+type Session struct {
 	Name         string
 	SessionID    string // the agent's own session id, or "" until linked
-	Agent        Agent
+	Agent        string
 	Attached     bool
 	AgentRunning bool
 	Activity     time.Time
@@ -26,13 +32,13 @@ type Tmux struct {
 	Cwd          string
 }
 
-func confPath() string { return home(".config", "orbit", "tmux.conf") }
+func ConfPath() string { return format.Home(".config", "orbit", "tmux.conf") }
 
 // Both spawn paths type a command into a shell that is still starting up.
 // zsh buffers keystrokes typed before its first prompt, so these delays only
 // need to clear the window/pane creation itself — but a cold shell here takes
 // ~0.6s, so they're generous, and overridable if your machine is slower.
-func delay(key string, def time.Duration) time.Duration {
+func Delay(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
@@ -41,8 +47,8 @@ func delay(key string, def time.Duration) time.Duration {
 	return def
 }
 
-func tmuxCmd(args ...string) *exec.Cmd {
-	return exec.Command("tmux", append([]string{"-L", socket, "-f", confPath()}, args...)...)
+func command(args ...string) *exec.Cmd {
+	return exec.Command("tmux", append([]string{"-L", Socket, "-f", ConfPath()}, args...)...)
 }
 
 const listFmt = "#{session_name}\x1f#{@orbit_session}\x1f#{@orbit_agent}\x1f#{session_attached}\x1f" +
@@ -53,14 +59,14 @@ var shells = map[string]bool{
 	"fish": true, "login": true, "tmux": true, "": true,
 }
 
-// TmuxList returns every live orbit session. Sessions started with `n` have no
+// List returns every live orbit session. Sessions started with `n` have no
 // @orbit_session until the agent writes a transcript and the model links them.
-func TmuxList() []*Tmux {
-	out, err := tmuxCmd("list-sessions", "-F", listFmt).Output()
+func List() []*Session {
+	out, err := command("list-sessions", "-F", listFmt).Output()
 	if err != nil {
 		return nil // no server running yet is the normal case
 	}
-	var res []*Tmux
+	var res []*Session
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Split(line, "\x1f")
 		if len(f) < 9 {
@@ -68,16 +74,10 @@ func TmuxList() []*Tmux {
 		}
 		act, _ := strconv.ParseInt(f[4], 10, 64)
 		created, _ := strconv.ParseInt(f[8], 10, 64)
-		ag := Claude
-		for _, a := range AllAgents {
-			if a.String() == f[2] {
-				ag = a
-			}
-		}
-		res = append(res, &Tmux{
+		res = append(res, &Session{
 			Name:         f[0],
 			SessionID:    f[1],
-			Agent:        ag,
+			Agent:        f[2],
 			Attached:     f[3] == "1",
 			Activity:     time.Unix(act, 0),
 			Created:      time.Unix(created, 0),
@@ -89,45 +89,29 @@ func TmuxList() []*Tmux {
 	return res
 }
 
-// tmuxSpawn creates a detached session and types cmd into it.
+// Spawn creates a detached session and types cmd into it.
 //
 // The command is typed into an interactive login shell rather than passed to
 // new-session, because agents are routinely shell functions or shims rather
 // than plain executables — a wrapper that exports a token, a version-manager
 // stub — and those don't exist in the bare `sh -c` new-session would use. It
 // also leaves you at a usable prompt if the agent exits.
-func tmuxSpawn(name, cwd, cmd, title string, ag Agent, sessionID string) error {
-	if err := tmuxCmd("new-session", "-d", "-s", name, "-c", cwd, "-x", "220", "-y", "60").Run(); err != nil {
+func Spawn(name, cwd, cmd, title, agent, sessionID string) error {
+	if err := command("new-session", "-d", "-s", name, "-c", cwd, "-x", "220", "-y", "60").Run(); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
-	tmuxCmd("set-option", "-t", name, "@orbit_agent", ag.String()).Run()
-	tmuxCmd("set-option", "-t", name, "@orbit_title", title).Run()
+	command("set-option", "-t", name, "@orbit_agent", agent).Run()
+	command("set-option", "-t", name, "@orbit_title", title).Run()
 	if sessionID != "" {
-		tmuxCmd("set-option", "-t", name, "@orbit_session", sessionID).Run()
+		command("set-option", "-t", name, "@orbit_session", sessionID).Run()
 	}
-	time.Sleep(delay("ORBIT_SPAWN_DELAY", 900*time.Millisecond))
-	return tmuxCmd("send-keys", "-t", name, cmd, "Enter").Run()
+	time.Sleep(Delay("ORBIT_SPAWN_DELAY", 900*time.Millisecond))
+	return command("send-keys", "-t", name, cmd, "Enter").Run()
 }
 
-// TmuxResume starts an existing session back up in a fresh tmux session.
-func TmuxResume(s *Session) (string, error) {
-	name := uniqueName(s.TmuxName())
-	err := tmuxSpawn(name, s.Cwd, s.Agent.ResumeCmd(s.ID), s.TabTitle(), s.Agent, s.ID)
-	return name, err
-}
-
-// TmuxNew starts a fresh agent session in cwd. It has no session id yet; the
-// model links it to a transcript once the agent writes one.
-func TmuxNew(ag Agent, cwd string) (string, error) {
-	stub := &Session{Agent: ag, Cwd: cwd, Title: "new " + ag.String()}
-	name := uniqueName(ag.Tag() + "-" + strings.NewReplacer("/", "-", ".", "_", " ", "_").Replace(stub.ShortCwd()))
-	err := tmuxSpawn(name, cwd, ag.NewCmd(), stub.TabTitle(), ag, "")
-	return name, err
-}
-
-func uniqueName(base string) string {
+func UniqueName(base string) string {
 	taken := map[string]bool{}
-	for _, t := range TmuxList() {
+	for _, t := range List() {
 		taken[t.Name] = true
 	}
 	if !taken[base] {
@@ -141,24 +125,24 @@ func uniqueName(base string) string {
 	}
 }
 
-func TmuxKill(name string) error { return tmuxCmd("kill-session", "-t", name).Run() }
+func Kill(name string) error { return command("kill-session", "-t", name).Run() }
 
-func TmuxCapture(name string, lines int) string {
-	out, err := tmuxCmd("capture-pane", "-p", "-t", name, "-S", "-"+strconv.Itoa(lines)).Output()
+func Capture(name string, lines int) string {
+	out, err := command("capture-pane", "-p", "-t", name, "-S", "-"+strconv.Itoa(lines)).Output()
 	if err != nil {
 		return ""
 	}
 	return strings.TrimRight(string(out), "\n")
 }
 
-// TmuxLink records which transcript a session turned out to be writing to.
-func TmuxLink(name, sessionID string) {
-	tmuxCmd("set-option", "-t", name, "@orbit_session", sessionID).Run()
+// Link records which transcript a session turned out to be writing to.
+func Link(name, sessionID string) {
+	command("set-option", "-t", name, "@orbit_session", sessionID).Run()
 }
 
-// TmuxRetitle keeps the tab label in sync as the agent renames the session.
-func TmuxRetitle(name, title string) {
-	tmuxCmd("set-option", "-t", name, "@orbit_title", title).Run()
+// Retitle keeps the tab label in sync as the agent renames the session.
+func Retitle(name, title string) {
+	command("set-option", "-t", name, "@orbit_title", title).Run()
 }
 
 // OpenTab drives Ghostty's own cmd+T through System Events, landing the session
@@ -166,14 +150,14 @@ func TmuxRetitle(name, title string) {
 // (+new-window is Linux-only), so this is the only route that doesn't spawn a
 // detached window. Needs Accessibility permission for the terminal.
 func OpenTab(name string) error {
-	attach := "tmux -L " + socket + " -f " + confPath() + " attach -t " + name
-	wait := delay("ORBIT_TAB_DELAY", time.Second).Seconds()
+	attach := "tmux -L " + Socket + " -f " + ConfPath() + " attach -t " + name
+	wait := Delay("ORBIT_TAB_DELAY", time.Second).Seconds()
 	script := fmt.Sprintf(`
 tell application "Ghostty" to activate
-delay 0.35
+Delay 0.35
 tell application "System Events" to tell process "Ghostty"
 	keystroke "t" using command down
-	delay %.2f
+	Delay %.2f
 	keystroke %s
 	key code 36
 end tell`, wait, applescriptString(attach))
@@ -184,13 +168,48 @@ end tell`, wait, applescriptString(attach))
 func OpenWindow(name, cwd string) error {
 	if runtime.GOOS == "darwin" {
 		return exec.Command("open", "-na", "Ghostty.app", "--args",
-			"--working-directory="+cwd, "-e", "tmux", "-L", socket, "-f", confPath(),
+			"--working-directory="+cwd, "-e", "tmux", "-L", Socket, "-f", ConfPath(),
 			"attach", "-t", name).Run()
 	}
 	return exec.Command("ghostty", "--working-directory="+cwd,
-		"-e", "tmux", "-L", socket, "-f", confPath(), "attach", "-t", name).Start()
+		"-e", "tmux", "-L", Socket, "-f", ConfPath(), "attach", "-t", name).Start()
 }
 
 func applescriptString(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
+
+//go:embed tmux.conf
+var defaultConf string
+
+const confMarker = "# orbit —"
+
+// installConf keeps ~/.config/orbit/tmux.conf in sync with the embedded copy,
+// but only overwrites a file orbit itself wrote — edits you make by hand stick.
+func InstallConf() error {
+	path := ConfPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	existing, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+	case err != nil:
+		return err
+	case string(existing) == defaultConf:
+		return nil
+	case !strings.HasPrefix(string(existing), confMarker):
+		return nil // hand-edited or foreign; leave it alone
+	}
+	return os.WriteFile(path, []byte(defaultConf), 0o644)
+}
+
+// Available reports whether tmux is installed.
+func Available() bool {
+	_, err := exec.LookPath("tmux")
+	return err == nil
+}
+
+// KillServerForTest tears down the orbit tmux server. Only integration tests
+// should need this; normal teardown is per-session via Kill.
+func KillServerForTest() error { return command("kill-server").Run() }

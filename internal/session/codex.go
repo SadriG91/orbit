@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"bufio"
@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/format"
 )
 
 // Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
@@ -16,7 +18,7 @@ import (
 // from the trailing event_msg stream.
 
 func (ix *Index) scanCodex() []*Session {
-	root := home(".codex", "sessions")
+	root := format.Home(".codex", "sessions")
 	var paths []string
 	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -124,7 +126,7 @@ func parseCodex(path string, mod time.Time) *Session {
 		return nil
 	}
 	// Title from the first prompt, last prompt separately — keep them distinct.
-	s.Title = truncate(firstLine(s.Title), 60)
-	s.Modified = eventTime(lastStamp, mod)
+	s.Title = format.Truncate(format.FirstLine(s.Title), 60)
+	s.Modified = EventTime(lastStamp, mod)
 	return s
 }

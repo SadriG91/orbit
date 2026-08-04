@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"bufio"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/format"
 )
 
 // Claude Code: ~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
@@ -14,7 +16,7 @@ import (
 // out of the records instead of decoded from the path.
 
 func (ix *Index) scanClaude() []*Session {
-	root := home(".claude", "projects")
+	root := format.Home(".claude", "projects")
 	dirs, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -131,7 +133,7 @@ func parseClaude(path string, mod time.Time) *Session {
 	if s.Cwd == "" {
 		return nil // can't resume somewhere we can't locate
 	}
-	s.Modified = eventTime(lastStamp, mod)
+	s.Modified = EventTime(lastStamp, mod)
 	return s
 }
 

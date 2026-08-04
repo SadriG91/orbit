@@ -1,13 +1,13 @@
-package main
+package config
 
 import (
 	_ "embed"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/sadrig91/orbit/internal/format"
 )
 
 //go:embed config.toml
@@ -42,24 +42,26 @@ type Provider struct {
 	AutoMinNew    int      `toml:"auto_min_new_messages"`
 }
 
-func (s Summary) provider(a Agent) Provider {
-	switch a {
-	case Codex:
+// Providers are addressed by name rather than by an Agent type: config sits at
+// the bottom of the dependency graph and shouldn't know what an agent is.
+func (s Summary) provider(agent string) Provider {
+	switch agent {
+	case "codex":
 		return s.Codex
-	case Copilot:
+	case "copilot":
 		return s.Copilot
 	}
 	return s.Claude
 }
 
-func (s Summary) For(a Agent) []string { return s.provider(a).Command }
+func (s Summary) For(agent string) []string { return s.provider(agent).Command }
 
 // InputBudget is how much transcript may be sent. Summarising deliberately runs
 // on cheap models, whose context windows are the smallest, so this is the
 // setting that keeps a huge session from blowing the window — per provider,
 // because one of them may be pointed at a larger model.
-func (s Summary) InputBudget(a Agent) int {
-	if n := s.provider(a).MaxInputChars; n > 0 {
+func (s Summary) InputBudget(agent string) int {
+	if n := s.provider(agent).MaxInputChars; n > 0 {
 		return n
 	}
 	if s.MaxInputChars > 0 {
@@ -68,26 +70,26 @@ func (s Summary) InputBudget(a Agent) int {
 	return 12000
 }
 
-func configPath() string { return home(".config", "orbit", "config.toml") }
+func Path() string { return format.Home(".config", "orbit", "config.toml") }
 
-// LoadConfigDefaults parses the embedded default config — the single source of
+// LoadDefaults parses the embedded default config — the single source of
 // truth for defaults, so the shipped file and the fallbacks can't drift apart.
-func LoadConfigDefaults() (Config, error) {
+func LoadDefaults() (Config, error) {
 	var cfg Config
 	_, err := toml.Decode(defaultConfigTOML, &cfg)
 	return cfg, err
 }
 
-// LoadConfig reads the config file, writing the annotated default first if it
+// Load reads the config file, writing the annotated default first if it
 // doesn't exist yet. A malformed file is reported rather than silently ignored,
 // but never fatal — orbit falls back to defaults and carries on.
-func LoadConfig() (Config, error) {
-	cfg, err := LoadConfigDefaults()
+func Load() (Config, error) {
+	cfg, err := LoadDefaults()
 	if err != nil {
 		return cfg, err
 	}
 
-	path := configPath()
+	path := Path()
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
@@ -104,41 +106,18 @@ func LoadConfig() (Config, error) {
 	return cfg, nil
 }
 
-// Env vars override the file so a single run can be changed without editing it.
-func (c Config) iconMode() IconMode {
-	mode := c.Icons
+// Icons returns the configured icon mode, letting the environment override the
+// file so a single run can be changed without editing it. Resolving the string
+// into a mode is the UI's job.
+func (c Config) IconMode() string {
 	if v := os.Getenv("ORBIT_ICONS"); v != "" {
-		mode = v
+		return v
 	}
-	if (mode == "logo" || mode == "auto") && LogosSupported() {
-		return IconLogo
-	}
-	return IconText
+	return c.Icons
 }
 
-func (c Config) attachMode() attachMode {
-	switch c.Attach {
-	case "tab":
-		return attachTab
-	case "window":
-		return attachWindow
-	case "inline":
-		return attachInline
-	}
-	return attachSmart
-}
-
-func (c Config) sortMode() SortMode {
-	for _, s := range AllSorts {
-		if strings.EqualFold(s.String(), c.Sort) {
-			return s
-		}
-	}
-	return SortAge
-}
-
-func (c Config) spawnDelay() time.Duration { return parseDur(c.SpawnDelay, 900*time.Millisecond) }
-func (c Config) tabDelay() time.Duration   { return parseDur(c.TabDelay, time.Second) }
+func (c Config) SpawnDelayDur() time.Duration { return parseDur(c.SpawnDelay, 900*time.Millisecond) }
+func (c Config) TabDelayDur() time.Duration   { return parseDur(c.TabDelay, time.Second) }
 
 func parseDur(s string, def time.Duration) time.Duration {
 	if d, err := time.ParseDuration(s); err == nil {

@@ -1,14 +1,17 @@
-package main
+package session
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/tmux"
 )
 
 type Agent int
@@ -57,31 +60,6 @@ func (a Agent) NewCmd() string { return a.String() }
 func (a Agent) Installed() bool {
 	_, err := exec.LookPath(a.String())
 	return err == nil
-}
-
-// IconMode picks how an agent is identified in the list.
-type IconMode int
-
-const (
-	IconText IconMode = iota // cl / cx / cp — works in any terminal
-	IconLogo                 // the real brand marks, via Kitty graphics
-)
-
-// ResolveIconMode honours ORBIT_ICONS, defaulting to text: logos need a
-// terminal that composites Kitty graphics, and a wrong guess renders mojibake
-// rather than degrading quietly.
-func ResolveIconMode() IconMode {
-	switch os.Getenv("ORBIT_ICONS") {
-	case "logo":
-		if LogosSupported() {
-			return IconLogo
-		}
-	case "auto":
-		if LogosSupported() {
-			return IconLogo
-		}
-	}
-	return IconText
 }
 
 // Hint is what a transcript says about where the session stopped, before
@@ -146,7 +124,7 @@ type Session struct {
 	Modified time.Time
 
 	hint  Hint
-	Tmux  *Tmux
+	Tmux  *tmux.Session
 	State State
 }
 
@@ -175,17 +153,17 @@ func (s *Session) ShortCwd() string {
 
 func (s *Session) Name() string {
 	if s.Title != "" {
-		return firstLine(s.Title)
+		return format.FirstLine(s.Title)
 	}
 	if s.Last != "" {
-		return firstLine(s.Last)
+		return format.FirstLine(s.Last)
 	}
 	return "(untitled)"
 }
 
 // TabTitle is what Ghostty puts on the tab.
 func (s *Session) TabTitle() string {
-	return s.ShortCwd() + " · " + truncate(s.Name(), 48)
+	return s.ShortCwd() + " · " + format.Truncate(s.Name(), 48)
 }
 
 func (s *Session) TmuxName() string {
@@ -201,7 +179,7 @@ func (s *Session) Live() bool {
 	return s.State == Working || s.State == NeedsApproval || s.State == YourTurn
 }
 
-func (s *Session) resolve(now time.Time) {
+func (s *Session) Resolve(now time.Time) {
 	if s.Tmux == nil {
 		s.State = Dormant
 		return
@@ -331,11 +309,11 @@ func (ix *Index) scanPaths(paths []string, ag Agent, parse func(string, time.Tim
 	return out
 }
 
-// eventTime prefers the timestamp the agent itself recorded over the file's
+// EventTime prefers the timestamp the agent itself recorded over the file's
 // mtime. They diverge badly: agents rewrite old transcripts in batches (title
 // backfills and the like), which bumps mtime on sessions untouched for weeks
 // and makes a three-week-old conversation claim it ran an hour ago.
-func eventTime(stamp string, fallback time.Time) time.Time {
+func EventTime(stamp string, fallback time.Time) time.Time {
 	if stamp == "" {
 		return fallback
 	}
@@ -347,13 +325,8 @@ func eventTime(stamp string, fallback time.Time) time.Time {
 	return fallback
 }
 
-func home(rest ...string) string {
-	h, _ := os.UserHomeDir()
-	return filepath.Join(append([]string{h}, rest...)...)
-}
-
-func sortSessionsBy(ss []*Session, mode SortMode) {
-	sortSessions(ss) // state first, recency within it
+func SortSessionsBy(ss []*Session, mode SortMode) {
+	SortSessions(ss) // state first, recency within it
 	if mode == SortAge {
 		return
 	}
@@ -381,7 +354,7 @@ func sortSessionsBy(ss []*Session, mode SortMode) {
 	})
 }
 
-func sortSessions(ss []*Session) {
+func SortSessions(ss []*Session) {
 	rank := func(s *Session) int {
 		switch s.State {
 		case NeedsApproval:
@@ -401,4 +374,56 @@ func sortSessions(ss []*Session) {
 		}
 		return ss[i].Modified.After(ss[j].Modified)
 	})
+}
+
+// RecordText pulls the human-readable text out of a transcript record, for
+// both Claude's message blocks and Codex's event payloads.
+func RecordText(line []byte) string {
+	var r struct {
+		Message *struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+		Payload *struct {
+			Message string `json:"message"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &r) != nil {
+		return ""
+	}
+	if r.Payload != nil && r.Payload.Message != "" {
+		return r.Payload.Message
+	}
+	if r.Message == nil || len(r.Message.Content) == 0 {
+		return ""
+	}
+	if r.Message.Content[0] == '"' {
+		var s string
+		json.Unmarshal(r.Message.Content, &s)
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(r.Message.Content, &blocks) != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, b := range blocks {
+		if b.Text != "" {
+			sb.WriteString(b.Text)
+			sb.WriteByte(' ')
+		}
+	}
+	return sb.String()
+}
+
+// ParseSortMode resolves a configured name, falling back to age.
+func ParseSortMode(name string) SortMode {
+	for _, s := range AllSorts {
+		if strings.EqualFold(s.String(), name) {
+			return s
+		}
+	}
+	return SortAge
 }

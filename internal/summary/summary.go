@@ -1,4 +1,4 @@
-package main
+package summary
 
 import (
 	"bufio"
@@ -9,6 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/format"
+
+	"github.com/sadrig91/orbit/internal/config"
+
+	"github.com/sadrig91/orbit/internal/session"
 )
 
 // Cached summaries of what a session was actually about.
@@ -24,10 +30,10 @@ import (
 // alternative — re-reading the whole transcript every turn — makes keeping a
 // long, active session summarised the most expensive thing orbit could do.
 
-// maxIncrements caps how many times a summary may be updated from its own
+// MaxIncrements caps how many times a summary may be updated from its own
 // previous text before being rebuilt from the transcript. Rolling summaries
 // compound their own omissions; periodically starting over bounds the drift.
-const maxIncrements = 5
+const MaxIncrements = 5
 
 const fullPrompt = `Summarise this coding session transcript in 2-3 short sentences.
 Say what the user was trying to do and how it ended (finished, abandoned, blocked).
@@ -49,10 +55,10 @@ EXISTING SUMMARY:
 NEW MESSAGES SINCE:
 `
 
-// SummaryRecord is what gets cached: the text, plus a watermark of how much of
+// Record is what gets cached: the text, plus a watermark of how much of
 // the conversation it accounts for.
-type SummaryRecord struct {
-	Summary      string    `json:"summary"`
+type Record struct {
+	Text         string    `json:"summary"`
 	CoveredUntil time.Time `json:"covered_until"`
 	CoveredMsgs  int       `json:"covered_msgs"`
 	Generation   int       `json:"generation"` // incremental updates since a full rebuild
@@ -62,51 +68,51 @@ type SummaryRecord struct {
 // Stale reports whether the session has moved on since the summary was written.
 // Message count is the signal rather than timestamps, because it is unaffected
 // by the housekeeping records agents append to old transcripts.
-func (r SummaryRecord) Stale(s *Session) bool { return s.Msgs > r.CoveredMsgs }
+func (r Record) Stale(s *session.Session) bool { return s.Msgs > r.CoveredMsgs }
 
 // Behind is how many messages the summary hasn't seen.
-func (r SummaryRecord) Behind(s *Session) int { return max(0, s.Msgs-r.CoveredMsgs) }
+func (r Record) Behind(s *session.Session) int { return max(0, s.Msgs-r.CoveredMsgs) }
 
-func summaryDir() string { return home(".cache", "orbit", "summaries") }
+func Dir() string { return format.Home(".cache", "orbit", "summaries") }
 
 // Keyed by session, not by session state: a continued conversation updates its
 // summary rather than orphaning it.
-func summaryFile(s *Session) string {
-	return filepath.Join(summaryDir(), s.Agent.String()+"-"+s.ID+".json")
+func File(s *session.Session) string {
+	return filepath.Join(Dir(), s.Agent.String()+"-"+s.ID+".json")
 }
 
-func LoadSummary(s *Session) (SummaryRecord, bool) {
-	b, err := os.ReadFile(summaryFile(s))
+func Load(s *session.Session) (Record, bool) {
+	b, err := os.ReadFile(File(s))
 	if err != nil {
-		return SummaryRecord{}, false
+		return Record{}, false
 	}
-	var rec SummaryRecord
-	if json.Unmarshal(b, &rec) != nil || rec.Summary == "" {
-		return SummaryRecord{}, false
+	var rec Record
+	if json.Unmarshal(b, &rec) != nil || rec.Text == "" {
+		return Record{}, false
 	}
 	return rec, true
 }
 
-func saveSummary(s *Session, rec SummaryRecord) {
-	if err := os.MkdirAll(summaryDir(), 0o755); err != nil {
+func save(s *session.Session, rec Record) {
+	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return
 	}
 	if b, err := json.MarshalIndent(rec, "", "  "); err == nil {
-		os.WriteFile(summaryFile(s), b, 0o644)
+		os.WriteFile(File(s), b, 0o644)
 	}
 }
 
-// GenerateSummary produces or updates a session's summary. It is slow — several
+// Generate produces or updates a session's summary. It is slow — several
 // seconds — so callers should treat it as a background job.
-func GenerateSummary(s *Session, cfg Summary) (SummaryRecord, error) {
-	argv := cfg.For(s.Agent)
+func Generate(s *session.Session, cfg config.Summary) (Record, error) {
+	argv := cfg.For(s.Agent.String())
 	if len(argv) == 0 {
-		return SummaryRecord{}, errNoCommand
+		return Record{}, errNoCommand
 	}
 
-	prompt, gen, err := buildPrompt(s, cfg.InputBudget(s.Agent))
+	prompt, gen, err := buildPrompt(s, cfg.InputBudget(s.Agent.String()))
 	if err != nil {
-		return SummaryRecord{}, err
+		return Record{}, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -117,37 +123,37 @@ func GenerateSummary(s *Session, cfg Summary) (SummaryRecord, error) {
 	cmd.Dir = s.Cwd // some CLIs refuse to start outside a workspace
 	out, err := cmd.Output()
 	if err != nil {
-		return SummaryRecord{}, err
+		return Record{}, err
 	}
 
 	text := strings.TrimSpace(string(out))
 	if cfg.MaxChars > 0 {
-		text = truncate(text, cfg.MaxChars)
+		text = format.Truncate(text, cfg.MaxChars)
 	}
 	if text == "" {
-		return SummaryRecord{}, errEmptySummary
+		return Record{}, errEmptySummary
 	}
 
-	rec := SummaryRecord{
-		Summary:      text,
+	rec := Record{
+		Text:         text,
 		CoveredUntil: s.Modified,
 		CoveredMsgs:  s.Msgs,
 		Generation:   gen,
 		Written:      time.Now(),
 	}
-	saveSummary(s, rec)
+	save(s, rec)
 	return rec, nil
 }
 
 // buildPrompt chooses between a full summarisation and an incremental update,
 // and returns the generation number the result will carry.
-func buildPrompt(s *Session, budget int) (string, int, error) {
-	if prev, ok := LoadSummary(s); ok && prev.Stale(s) && prev.Generation < maxIncrements {
+func buildPrompt(s *session.Session, budget int) (string, int, error) {
+	if prev, ok := Load(s); ok && prev.Stale(s) && prev.Generation < MaxIncrements {
 		since, err := transcriptSince(s, prev.CoveredUntil, budget)
 		// If the "new" part is most of the conversation, updating from the old
 		// summary buys nothing over reading the transcript properly.
 		if err == nil && since != "" && prev.Behind(s)*3 < s.Msgs {
-			return strings.Replace(updatePrompt, "{{PREV}}", prev.Summary, 1) + since,
+			return strings.Replace(updatePrompt, "{{PREV}}", prev.Text, 1) + since,
 				prev.Generation + 1, nil
 		}
 	}
@@ -170,7 +176,7 @@ const (
 // transcriptSince returns only the messages recorded after a given time. This
 // is what keeps an active session cheap to stay on top of: the input is
 // proportional to what changed, not to how long the conversation has run.
-func transcriptSince(s *Session, since time.Time, maxChars int) (string, error) {
+func transcriptSince(s *session.Session, since time.Time, maxChars int) (string, error) {
 	if s.Path == "" {
 		return "Latest prompt: " + s.Last, nil // copilot has no transcript file
 	}
@@ -186,14 +192,14 @@ func transcriptSince(s *Session, since time.Time, maxChars int) (string, error) 
 	sc.Buffer(make([]byte, 256*1024), 64*1024*1024)
 	for sc.Scan() {
 		line := sc.Bytes()
-		if ts := recordTime(line); ts.IsZero() || !ts.After(since) {
+		if ts := RecordTime(line); ts.IsZero() || !ts.After(since) {
 			continue
 		}
-		text := strings.TrimSpace(clean(recordText(line)))
+		text := strings.TrimSpace(format.Clean(session.RecordText(line)))
 		if text == "" {
 			continue
 		}
-		text = truncate(text, 600)
+		text = format.Truncate(text, 600)
 		parts = append(parts, text)
 		total += len(text)
 		for total > maxChars && len(parts) > 1 {
@@ -204,20 +210,20 @@ func transcriptSince(s *Session, since time.Time, maxChars int) (string, error) 
 	return strings.Join(parts, "\n"), nil
 }
 
-func recordTime(line []byte) time.Time {
+func RecordTime(line []byte) time.Time {
 	var r struct {
 		Timestamp string `json:"timestamp"`
 	}
 	if json.Unmarshal(line, &r) != nil || r.Timestamp == "" {
 		return time.Time{}
 	}
-	return eventTime(r.Timestamp, time.Time{})
+	return session.EventTime(r.Timestamp, time.Time{})
 }
 
 // transcriptExcerpt builds the input for a full summarisation: the opening of
 // the conversation plus its tail. The middle is where tool output lives, which
 // is bulky and tells you least about intent.
-func transcriptExcerpt(s *Session, maxChars int) (string, error) {
+func transcriptExcerpt(s *session.Session, maxChars int) (string, error) {
 	const (
 		headLines = 12
 		tailLines = 40
@@ -239,11 +245,11 @@ func transcriptExcerpt(s *Session, maxChars int) (string, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 256*1024), 64*1024*1024)
 	for sc.Scan() {
-		text := strings.TrimSpace(clean(recordText(sc.Bytes())))
+		text := strings.TrimSpace(format.Clean(session.RecordText(sc.Bytes())))
 		if text == "" {
 			continue
 		}
-		text = truncate(text, 600)
+		text = format.Truncate(text, 600)
 		if len(head) < headLines {
 			head = append(head, text)
 			continue
@@ -272,21 +278,21 @@ func transcriptExcerpt(s *Session, maxChars int) (string, error) {
 	return out, nil
 }
 
-// PruneSummaries drops cache entries for sessions that no longer exist. Entries
+// Prune drops cache entries for sessions that no longer exist. Entries
 // for sessions that merely moved on are kept — they are the basis of the next
 // incremental update.
-func PruneSummaries(sessions []*Session) {
+func Prune(sessions []*session.Session) {
 	live := map[string]bool{}
 	for _, s := range sessions {
-		live[filepath.Base(summaryFile(s))] = true
+		live[filepath.Base(File(s))] = true
 	}
-	entries, err := os.ReadDir(summaryDir())
+	entries, err := os.ReadDir(Dir())
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
 		if !live[e.Name()] {
-			os.Remove(filepath.Join(summaryDir(), e.Name()))
+			os.Remove(filepath.Join(Dir(), e.Name()))
 		}
 	}
 }

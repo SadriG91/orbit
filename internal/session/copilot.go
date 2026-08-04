@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/format"
 )
 
 // Copilot CLI keeps a real database rather than transcripts:
@@ -41,7 +43,7 @@ func copilotTime(s string) time.Time {
 }
 
 func (ix *Index) scanCopilot() []*Session {
-	db := home(".copilot", "session-store.db")
+	db := format.Home(".copilot", "session-store.db")
 	stamp := ""
 	for _, p := range []string{db, db + "-wal"} {
 		if fi, err := os.Stat(p); err == nil {

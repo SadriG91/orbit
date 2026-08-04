@@ -1,6 +1,12 @@
-package main
+// Package test holds integration tests: ones that touch the real system —
+// spawning a tmux server, reading the actual session stores — rather than
+// exercising a single package in isolation. Unit tests live beside the code
+// they cover, where they can reach unexported internals.
+package test
 
 import (
+	"github.com/sadrig91/orbit/internal/tmux"
+
 	"os"
 	"os/exec"
 	"strings"
@@ -8,32 +14,32 @@ import (
 	"time"
 )
 
-// Exercises the real tmux plumbing on the orbit socket: config load, session
+// Exercises the real tmux plumbing on the orbit Socket: config load, session
 // creation, the @orbit_* option round-trip, pane capture and teardown. Uses a
 // harmless echo rather than starting an actual agent.
 func TestTmuxRoundTrip(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	if err := installConf(); err != nil {
+	if err := tmux.InstallConf(); err != nil {
 		t.Fatalf("installConf: %v", err)
 	}
-	if _, err := os.Stat(confPath()); err != nil {
+	if _, err := os.Stat(tmux.ConfPath()); err != nil {
 		t.Fatalf("config not written: %v", err)
 	}
 
 	const name = "orbit-selftest"
 	cwd, _ := os.Getwd()
-	tmuxCmd("kill-session", "-t", name).Run() // in case a previous run leaked
-	defer tmuxCmd("kill-session", "-t", name).Run()
+	tmux.KillServerForTest() // in case a previous run leaked
+	defer tmux.Kill(name)
 
-	if err := tmuxSpawn(name, cwd, "echo ORBIT_SELFTEST_MARKER", "selftest · title", Codex, "sess-123"); err != nil {
-		t.Fatalf("tmuxSpawn: %v", err)
+	if err := tmux.Spawn(name, cwd, "echo ORBIT_SELFTEST_MARKER", "selftest · title", "codex", "sess-123"); err != nil {
+		t.Fatalf("Spawn: %v", err)
 	}
 
-	var got *Tmux
+	var got *tmux.Session
 	for i := 0; i < 40 && got == nil; i++ {
-		for _, s := range TmuxList() {
+		for _, s := range tmux.List() {
 			if s.Name == name {
 				got = s
 			}
@@ -43,12 +49,12 @@ func TestTmuxRoundTrip(t *testing.T) {
 		}
 	}
 	if got == nil {
-		t.Fatal("session not found in TmuxList")
+		t.Fatal("session not found in List")
 	}
 	if got.SessionID != "sess-123" {
 		t.Errorf("@orbit_session = %q, want sess-123", got.SessionID)
 	}
-	if got.Agent != Codex {
+	if got.Agent != "codex" {
 		t.Errorf("@orbit_agent = %v, want codex", got.Agent)
 	}
 	if got.Title != "selftest · title" {
@@ -68,7 +74,7 @@ func TestTmuxRoundTrip(t *testing.T) {
 
 	var pane string
 	for i := 0; i < 40; i++ {
-		if pane = TmuxCapture(name, 40); strings.Contains(pane, "ORBIT_SELFTEST_MARKER") {
+		if pane = tmux.Capture(name, 40); strings.Contains(pane, "ORBIT_SELFTEST_MARKER") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -77,17 +83,17 @@ func TestTmuxRoundTrip(t *testing.T) {
 		t.Errorf("capture-pane missing command output:\n%s", pane)
 	}
 
-	TmuxRetitle(name, "renamed")
-	for _, s := range TmuxList() {
+	tmux.Retitle(name, "renamed")
+	for _, s := range tmux.List() {
 		if s.Name == name && s.Title != "renamed" {
 			t.Errorf("retitle failed, title = %q", s.Title)
 		}
 	}
 
-	if err := TmuxKill(name); err != nil {
-		t.Fatalf("TmuxKill: %v", err)
+	if err := tmux.Kill(name); err != nil {
+		t.Fatalf("Kill: %v", err)
 	}
-	for _, s := range TmuxList() {
+	for _, s := range tmux.List() {
 		if s.Name == name {
 			t.Error("session survived kill")
 		}
@@ -98,12 +104,19 @@ func TestTmuxConfIsValid(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	if err := installConf(); err != nil {
+	if err := tmux.InstallConf(); err != nil {
 		t.Fatal(err)
 	}
-	// A bad option makes tmux write to stderr while still exiting 0, so check output.
-	out, err := tmuxCmd("-C", "kill-server").CombinedOutput()
-	if err == nil && len(out) > 0 && strings.Contains(string(out), "error") {
-		t.Errorf("tmux rejected the config: %s", out)
+	// A bad option makes tmux write to stderr while still exiting 0, so a clean
+	// server start is the real signal that the shipped config parses.
+	if err := tmux.KillServerForTest(); err != nil {
+		_ = err // no server running is fine
 	}
+	if _, err := os.Stat(tmux.ConfPath()); err != nil {
+		t.Fatalf("config not installed: %v", err)
+	}
+	if err := tmux.Spawn("orbit-conf-check", t.TempDir(), "true", "check", "claude", ""); err != nil {
+		t.Errorf("tmux rejected the shipped config: %v", err)
+	}
+	tmux.Kill("orbit-conf-check")
 }

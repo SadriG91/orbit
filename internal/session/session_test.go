@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"os"
@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sadrig91/orbit/internal/tmux"
 )
 
 // Agents rewrite old transcripts in batches, so mtime is not the session's age.
@@ -14,7 +16,7 @@ func TestEventTimePrefersRecordedTimestamp(t *testing.T) {
 	mtime := time.Now()
 	real := "2026-07-14T09:30:00.000Z"
 
-	got := eventTime(real, mtime)
+	got := EventTime(real, mtime)
 	want, _ := time.Parse(time.RFC3339, real)
 	if !got.Equal(want) {
 		t.Errorf("got %v, want the recorded timestamp %v", got, want)
@@ -22,15 +24,15 @@ func TestEventTimePrefersRecordedTimestamp(t *testing.T) {
 	if time.Since(got) < 24*time.Hour {
 		t.Error("a three-week-old session must not look recent")
 	}
-	if got := eventTime("", mtime); !got.Equal(mtime) {
+	if got := EventTime("", mtime); !got.Equal(mtime) {
 		t.Errorf("with no timestamp it should fall back to mtime, got %v", got)
 	}
-	if got := eventTime("not a date", mtime); !got.Equal(mtime) {
+	if got := EventTime("not a date", mtime); !got.Equal(mtime) {
 		t.Errorf("an unparseable timestamp should fall back to mtime, got %v", got)
 	}
 	// Codex writes fractional seconds; Claude sometimes doesn't.
 	for _, s := range []string{"2026-07-14T09:30:00Z", "2026-07-14T09:30:00.074Z"} {
-		if eventTime(s, mtime).Equal(mtime) {
+		if EventTime(s, mtime).Equal(mtime) {
 			t.Errorf("failed to parse %q", s)
 		}
 	}
@@ -60,5 +62,38 @@ func TestOnlyConversationTurnsDateTheSession(t *testing.T) {
 	want, _ := time.Parse(time.RFC3339, "2026-07-30T09:29:50.000Z")
 	if !s.Modified.Equal(want) {
 		t.Errorf("dated %v, want the last real turn %v", s.Modified, want)
+	}
+}
+
+func TestSortModesOrderCorrectly(t *testing.T) {
+	now := time.Now()
+	mk := func(id string, ag Agent, cwd string, tok int64, ago time.Duration) *Session {
+		return &Session{ID: id, Agent: ag, Cwd: cwd, Tokens: tok, Modified: now.Add(-ago)}
+	}
+	ss := []*Session{
+		mk("a", Claude, "/z", 10, time.Hour),
+		mk("b", Codex, "/a", 900, 48*time.Hour),
+		mk("c", Copilot, "/m", 50, time.Minute),
+	}
+	SortSessionsBy(ss, SortTokens)
+	if ss[0].ID != "b" {
+		t.Errorf("by tokens: got %s first, want b", ss[0].ID)
+	}
+	SortSessionsBy(ss, SortProject)
+	if ss[0].Cwd != "/a" {
+		t.Errorf("by project: got %s first", ss[0].Cwd)
+	}
+	SortSessionsBy(ss, SortAge)
+	if ss[0].ID != "c" {
+		t.Errorf("by age: got %s first, want the newest (c)", ss[0].ID)
+	}
+
+	// A live session outranks everything regardless of sort, or the one thing
+	// demanding attention could sort to the bottom.
+	ss[0].Tmux, ss[0].State = &tmux.Session{AgentRunning: true}, NeedsApproval
+	live := ss[0].ID
+	SortSessionsBy(ss, SortTokens)
+	if ss[0].ID != live {
+		t.Errorf("a session needing attention must stay pinned to the top")
 	}
 }

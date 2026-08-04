@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"os"
@@ -11,6 +11,12 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/sadrig91/orbit/internal/config"
+	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/search"
+	"github.com/sadrig91/orbit/internal/session"
+	"github.com/sadrig91/orbit/internal/summary"
+	"github.com/sadrig91/orbit/internal/tmux"
 )
 
 var (
@@ -34,25 +40,25 @@ var (
 	sErr    = lipgloss.NewStyle().Foreground(cRed)
 )
 
-func stateStyle(s State) lipgloss.Style {
+func stateStyle(s session.State) lipgloss.Style {
 	switch s {
-	case Working:
+	case session.Working:
 		return lipgloss.NewStyle().Foreground(cBright)
-	case NeedsApproval:
+	case session.NeedsApproval:
 		return lipgloss.NewStyle().Foreground(cAmber).Bold(true)
-	case YourTurn:
+	case session.YourTurn:
 		return lipgloss.NewStyle().Foreground(cCyan)
-	case ShellOnly:
+	case session.ShellOnly:
 		return lipgloss.NewStyle().Foreground(cGreen)
 	}
 	return sDim
 }
 
-func agentStyle(a Agent) lipgloss.Style {
+func agentStyle(a session.Agent) lipgloss.Style {
 	switch a {
-	case Codex:
+	case session.Codex:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("110"))
-	case Copilot:
+	case session.Copilot:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("176"))
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("173"))
@@ -60,16 +66,16 @@ func agentStyle(a Agent) lipgloss.Style {
 
 type (
 	tickMsg    time.Time
-	scanMsg    []*Session
+	scanMsg    []*session.Session
 	previewMsg struct{ name, text string }
 	statusMsg  string
 	searchMsg  struct {
 		query   string
-		matches map[string]Match
+		matches map[string]search.Match
 	}
 	summaryMsg struct {
 		id, err string
-		rec     SummaryRecord
+		rec     summary.Record
 	}
 	// sendLogosMsg fires once the alt screen exists — see logosCmd.
 	sendLogosMsg struct{}
@@ -80,10 +86,10 @@ type (
 	}
 )
 
-type model struct {
-	ix     *Index
-	all    []*Session
-	view   []*Session
+type Model struct {
+	ix     *session.Index
+	all    []*session.Session
+	view   []*session.Session
 	cursor int
 	top    int
 	w, h   int
@@ -101,38 +107,45 @@ type model struct {
 	mode        attachMode
 	icons       IconMode
 	logosSent   bool
-	cfg         Config
-	sort        SortMode
+	cfg         config.Config
+	sort        session.SortMode
 	group       bool
 
 	searching bool
-	query     string                   // the committed full-text query
-	matches   map[string]Match         // session id -> where it matched
-	summaries map[string]SummaryRecord // session id -> cached or generated summary
-	pending   map[string]time.Time     // summaries in flight -> when they started
+	query     string                    // the committed full-text query
+	matches   map[string]search.Match   // session id -> where it matched
+	summaries map[string]summary.Record // session id -> cached or generated summary
+	pending   map[string]time.Time      // summaries in flight -> when they started
 	prog      progress.Model
 	queue     []string      // session ids waiting to be summarised
 	summaryE  time.Duration // rolling estimate, shown as elapsed context only
 	notify    *Notifier
 }
 
-func newModel(cfg Config, mode attachMode) *model {
+// New builds the dashboard. The attach override comes from a flag; empty means
+// use whatever the config says.
+func New(cfg config.Config, attachOverride string) *Model {
+	mode := parseAttachMode(cfg.Attach)
+	if attachOverride != "" {
+		mode = parseAttachMode(attachOverride)
+	}
 	ti := textinput.New()
 	ti.Prompt = "/"
 	ti.Placeholder = "filter"
 	ti.CharLimit = 80
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(cBright)
-	return &model{
-		ix: NewIndex(), filter: ti, spin: sp, mode: mode,
-		cfg: cfg, icons: cfg.iconMode(), sort: cfg.sortMode(), group: cfg.Group,
-		summaries: map[string]SummaryRecord{}, pending: map[string]time.Time{},
+	return &Model{
+		ix: session.NewIndex(), filter: ti, spin: sp, mode: mode,
+		cfg: cfg, icons: ResolveIconMode(cfg.IconMode()), sort: session.ParseSortMode(cfg.Sort), group: cfg.Group,
+		summaries: map[string]summary.Record{}, pending: map[string]time.Time{},
+		notify:   NewNotifier(cfg.Notify),
 		prog:     progress.New(progress.WithColors(lipgloss.Color("#1f8a54"), lipgloss.Color("#00ff87")), progress.WithoutPercentage()),
 		summaryE: 12 * time.Second, // seeded from observation; adapts as it runs
 	}
 }
 
-func (m *model) Init() tea.Cmd {
+func (m *Model) Init() tea.Cmd {
 	return tea.Batch(m.scan, tick(), m.spin.Tick)
 }
 
@@ -148,9 +161,9 @@ func tick() tea.Cmd {
 
 // scan reads every transcript store, joins it with live tmux state, and links
 // sessions started with `n` to whatever transcript they turned out to write.
-func (m *model) scan() tea.Msg {
+func (m *Model) scan() tea.Msg {
 	sessions := m.ix.Scan()
-	byID := map[string]*Session{}
+	byID := map[string]*session.Session{}
 	for _, s := range sessions {
 		// Sessions come from a cache and are reused across ticks, so last
 		// tick's tmux link has to be cleared or a killed session stays "live".
@@ -159,8 +172,8 @@ func (m *model) scan() tea.Msg {
 	}
 
 	claimed := map[string]bool{}
-	var unlinked []*Tmux
-	for _, t := range TmuxList() {
+	var unlinked []*tmux.Session
+	for _, t := range tmux.List() {
 		if t.SessionID == "" {
 			unlinked = append(unlinked, t)
 			continue
@@ -169,14 +182,14 @@ func (m *model) scan() tea.Msg {
 			s.Tmux = t
 			claimed[s.ID] = true
 			if want := s.TabTitle(); want != t.Title {
-				TmuxRetitle(t.Name, want)
+				tmux.Retitle(t.Name, want)
 			}
 		}
 	}
 	for _, t := range unlinked {
-		var best *Session
+		var best *session.Session
 		for _, s := range sessions {
-			if claimed[s.ID] || s.Agent != t.Agent || s.Cwd != t.Cwd {
+			if claimed[s.ID] || s.Agent.String() != t.Agent || s.Cwd != t.Cwd {
 				continue
 			}
 			if s.Modified.Before(t.Created) {
@@ -189,39 +202,39 @@ func (m *model) scan() tea.Msg {
 		if best != nil {
 			best.Tmux = t
 			claimed[best.ID] = true
-			TmuxLink(t.Name, best.ID)
-			TmuxRetitle(t.Name, best.TabTitle())
+			tmux.Link(t.Name, best.ID)
+			tmux.Retitle(t.Name, best.TabTitle())
 		}
 	}
 
 	now := time.Now()
 	for _, s := range sessions {
-		s.resolve(now)
+		s.Resolve(now)
 	}
-	sortSessionsBy(sessions, m.sort)
+	session.SortSessionsBy(sessions, m.sort)
 	return scanMsg(sessions)
 }
 
-func (m *model) capture() tea.Cmd {
+func (m *Model) capture() tea.Cmd {
 	s := m.sel()
 	if s == nil || s.Tmux == nil {
 		return func() tea.Msg { return previewMsg{} }
 	}
 	name := s.Tmux.Name
-	return func() tea.Msg { return previewMsg{name, TmuxCapture(name, 60)} }
+	return func() tea.Msg { return previewMsg{name, tmux.Capture(name, 60)} }
 }
 
-func (m *model) sel() *Session {
+func (m *Model) sel() *session.Session {
 	if m.cursor < 0 || m.cursor >= len(m.view) {
 		return nil
 	}
 	return m.view[m.cursor]
 }
 
-func (m *model) rebuild() {
+func (m *Model) rebuild() {
 	q := strings.ToLower(strings.TrimSpace(m.filter.Value()))
 	cutoff := time.Now().AddDate(0, 0, -m.cfg.RecentDays)
-	var keep *Session
+	var keep *session.Session
 	if s := m.sel(); s != nil {
 		keep = s
 	}
@@ -270,11 +283,11 @@ const maxSummaryJobs = 2
 // updates wait for a session to fall far enough behind, and never fire while a
 // turn is in flight — the transcript is still being written, and whatever it
 // says right now is about to change.
-func (m *model) shouldAutoSummarise(s *Session) bool {
+func (m *Model) shouldAutoSummarise(s *session.Session) bool {
 	if !m.cfg.Summary.Enabled || !m.cfg.Summary.Auto {
 		return false
 	}
-	if s.State == Working || s.State == NeedsApproval {
+	if s.State == session.Working || s.State == session.NeedsApproval {
 		return false
 	}
 	rec, have := m.summaries[s.ID]
@@ -290,7 +303,7 @@ func (m *model) shouldAutoSummarise(s *Session) bool {
 
 // summariseAll queues every visible session that has no summary yet. The global
 // progress bar then advances as each finishes.
-func (m *model) summariseAll() tea.Cmd {
+func (m *Model) summariseAll() tea.Cmd {
 	if !m.cfg.Summary.Enabled {
 		return func() tea.Msg { return statusMsg("summaries are disabled in config") }
 	}
@@ -311,7 +324,7 @@ func (m *model) summariseAll() tea.Cmd {
 	if n == 0 {
 		return func() tea.Msg { return statusMsg("every visible session is already summarised") }
 	}
-	m.say("queued " + itoa(n) + " sessions to summarise")
+	m.say("queued " + format.Itoa(n) + " sessions to summarise")
 	return m.pump()
 }
 
@@ -325,12 +338,12 @@ func slicesContains(xs []string, want string) bool {
 }
 
 // pump starts queued jobs up to the concurrency limit.
-func (m *model) pump() tea.Cmd {
+func (m *Model) pump() tea.Cmd {
 	var cmds []tea.Cmd
 	for len(m.pending) < maxSummaryJobs && len(m.queue) > 0 {
 		id := m.queue[0]
 		m.queue = m.queue[1:]
-		var target *Session
+		var target *session.Session
 		for _, s := range m.all {
 			if s.ID == id {
 				target = s
@@ -352,7 +365,7 @@ func (m *model) pump() tea.Cmd {
 
 // summarise kicks off a provider CLI in the background. It takes seconds, so
 // the UI stays responsive and the result arrives as a message.
-func (m *model) summarise(s *Session) tea.Cmd {
+func (m *Model) summarise(s *session.Session) tea.Cmd {
 	if !m.cfg.Summary.Enabled {
 		return func() tea.Msg { return statusMsg("summaries are disabled in config") }
 	}
@@ -366,7 +379,7 @@ func (m *model) summarise(s *Session) tea.Cmd {
 	m.say("summarising with " + s.Agent.String() + "…")
 	cfg, sess := m.cfg.Summary, s
 	gen := func() tea.Msg {
-		rec, err := GenerateSummary(sess, cfg)
+		rec, err := summary.Generate(sess, cfg)
 		out := summaryMsg{id: sess.ID, rec: rec}
 		if err != nil {
 			out.err = err.Error()
@@ -378,7 +391,7 @@ func (m *model) summarise(s *Session) tea.Cmd {
 
 // summaryElapsed reports how long a specific job has been running, for the
 // detail pane. It is not progress — the provider CLIs report none.
-func (m *model) summaryElapsed(id string) (time.Duration, bool) {
+func (m *Model) summaryElapsed(id string) (time.Duration, bool) {
 	started, ok := m.pending[id]
 	if !ok {
 		return 0, false
@@ -389,7 +402,7 @@ func (m *model) summaryElapsed(id string) (time.Duration, bool) {
 // summaryCoverage is the global bar: how many of the sessions on screen have a
 // summary. It only moves when one finishes, so it measures work completed
 // rather than time passed.
-func (m *model) summaryCoverage() (done, total, inflight int) {
+func (m *Model) summaryCoverage() (done, total, inflight int) {
 	for _, s := range m.view {
 		total++
 		if rec, have := m.summaries[s.ID]; have && !rec.Stale(s) {
@@ -399,21 +412,21 @@ func (m *model) summaryCoverage() (done, total, inflight int) {
 	return done, total, len(m.pending) + len(m.queue)
 }
 
-func (m *model) anyWorking() bool {
+func (m *Model) anyWorking() bool {
 	for _, s := range m.all {
-		if s.State == Working {
+		if s.State == session.Working {
 			return true
 		}
 	}
 	return false
 }
 
-func (m *model) say(s string) {
+func (m *Model) say(s string) {
 	m.status = s
 	m.statusUntil = time.Now().Add(6 * time.Second)
 }
 
-func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -441,7 +454,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case searchMsg:
 		m.query, m.matches = msg.query, msg.matches
 		m.rebuild()
-		m.say(itoa(len(msg.matches)) + " sessions mention " + strconv.Quote(msg.query))
+		m.say(format.Itoa(len(msg.matches)) + " sessions mention " + strconv.Quote(msg.query))
 		return m, nil
 
 	case summaryMsg:
@@ -468,7 +481,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if _, have := m.summaries[s.ID]; have {
 				continue
 			}
-			if rec, ok := LoadSummary(s); ok {
+			if rec, ok := summary.Load(s); ok {
 				m.summaries[s.ID] = rec
 			}
 		}
@@ -525,7 +538,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					all := m.all
 					m.say("searching transcripts for " + strconv.Quote(q) + "…")
 					return m, func() tea.Msg {
-						return searchMsg{query: q, matches: SearchTranscripts(all, q)}
+						return searchMsg{query: q, matches: search.Transcripts(all, q)}
 					}
 				}
 			default:
@@ -543,7 +556,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -579,16 +592,16 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.filter.Focus()
 		return m, textinput.Blink
 	case "o":
-		m.sort = AllSorts[(int(m.sort)+1)%len(AllSorts)]
-		sortSessionsBy(m.all, m.sort)
+		m.sort = session.AllSorts[(int(m.sort)+1)%len(session.AllSorts)]
+		session.SortSessionsBy(m.all, m.sort)
 		m.rebuild()
 		m.say("sorted by " + m.sort.String())
 		return m, nil
 	case "p":
 		m.group = !m.group
 		if m.group {
-			m.sort = SortProject
-			sortSessionsBy(m.all, m.sort)
+			m.sort = session.SortProject
+			session.SortSessionsBy(m.all, m.sort)
 			m.rebuild()
 		}
 		return m, nil
@@ -639,7 +652,7 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if s == nil {
 			return m, nil
 		}
-		return m, m.spawn(AllAgents[int(msg.String()[0]-'1')], s.Cwd)
+		return m, m.spawn(session.AllAgents[int(msg.String()[0]-'1')], s.Cwd)
 	}
 	return m, nil
 }
@@ -647,7 +660,7 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // open attaches the selected session, starting it first if it isn't running.
 // Starting is slow enough (a shell has to come up) that it happens in a command
 // and reports back through readyMsg rather than blocking the UI.
-func (m *model) open(mode attachMode) tea.Cmd {
+func (m *Model) open(mode attachMode) tea.Cmd {
 	s := m.sel()
 	if s == nil {
 		return nil
@@ -658,7 +671,7 @@ func (m *model) open(mode attachMode) tea.Cmd {
 	m.say("resuming " + s.Agent.String() + "…")
 	sess := s
 	return func() tea.Msg {
-		name, err := TmuxResume(sess)
+		name, err := resumeSession(sess)
 		if err != nil {
 			return statusMsg("resume failed: " + err.Error())
 		}
@@ -666,14 +679,14 @@ func (m *model) open(mode attachMode) tea.Cmd {
 	}
 }
 
-func (m *model) spawn(ag Agent, cwd string) tea.Cmd {
+func (m *Model) spawn(ag session.Agent, cwd string) tea.Cmd {
 	if !ag.Installed() {
 		return func() tea.Msg { return statusMsg(ag.String() + " is not installed") }
 	}
 	mode := m.mode
 	m.say("starting " + ag.String() + " in " + cwd + "…")
 	return func() tea.Msg {
-		name, err := TmuxNew(ag, cwd)
+		name, err := newSession(ag, cwd)
 		if err != nil {
 			return statusMsg("start failed: " + err.Error())
 		}
@@ -685,18 +698,18 @@ func (m *model) spawn(ag Agent, cwd string) tea.Cmd {
 // in-place path suspends orbit and restores it when you detach, so it works in
 // any terminal and needs no permissions — it's the fallback everywhere Ghostty
 // tab-spawning isn't available.
-func (m *model) attach(name, cwd string, mode attachMode) tea.Cmd {
+func (m *Model) attach(name, cwd string, mode attachMode) tea.Cmd {
 	switch mode.resolve() {
 	case attachTab:
 		return func() tea.Msg {
-			if err := OpenTab(name); err != nil {
+			if err := tmux.OpenTab(name); err != nil {
 				return statusMsg("tab failed: " + err.Error())
 			}
 			return statusMsg("attached " + name + " in a new tab")
 		}
 	case attachWindow:
 		return func() tea.Msg {
-			if err := OpenWindow(name, cwd); err != nil {
+			if err := tmux.OpenWindow(name, cwd); err != nil {
 				return statusMsg("window failed: " + err.Error())
 			}
 			return statusMsg("attached " + name + " in a new window")
@@ -711,16 +724,19 @@ func (m *model) attach(name, cwd string, mode attachMode) tea.Cmd {
 	}
 }
 
-func (m *model) kill() tea.Cmd {
+func (m *Model) kill() tea.Cmd {
 	s := m.sel()
 	if s == nil || s.Tmux == nil {
 		return func() tea.Msg { return statusMsg("nothing running for that session") }
 	}
 	name := s.Tmux.Name
 	return func() tea.Msg {
-		if err := TmuxKill(name); err != nil {
+		if err := tmux.Kill(name); err != nil {
 			return statusMsg("kill failed: " + err.Error())
 		}
 		return statusMsg("killed " + name)
 	}
 }
+
+// Close releases the notifier's handle on the terminal.
+func (m *Model) Close() { m.notify.Close() }

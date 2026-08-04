@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	_ "embed"
@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/sadrig91/orbit/internal/session"
 )
 
 // Official brand marks, from Simple Icons (CC0), rasterised to 64x64 RGBA and
@@ -22,11 +24,11 @@ var codexPNG []byte
 //go:embed assets/copilot.png
 var copilotPNG []byte
 
-func logoPNG(a Agent) []byte {
+func logoPNG(a session.Agent) []byte {
 	switch a {
-	case Codex:
+	case session.Codex:
 		return codexPNG
-	case Copilot:
+	case session.Copilot:
 		return copilotPNG
 	}
 	return claudePNG
@@ -34,7 +36,7 @@ func logoPNG(a Agent) []byte {
 
 // Stable per-agent image ids. The id is carried in the placeholder cell's
 // foreground colour, so it has to fit in 24 bits and not be zero.
-func imageID(a Agent) int { return 0x0B17 + int(a) + 1 }
+func imageID(a session.Agent) int { return 0x0B17 + int(a) + 1 }
 
 // The image occupies exactly the two columns the "cl"/"cx"/"cp" tag used to.
 const logoCols, logoRows = 2, 1
@@ -48,6 +50,23 @@ var rowColumnDiacritics = []rune{
 // placeholder is the private-use character Kitty reserves for virtual image
 // placements; the terminal swaps these cells for the image.
 const placeholder = '\U0010EEEE'
+
+// IconMode picks how an agent is identified in the list.
+type IconMode int
+
+const (
+	IconText IconMode = iota // cl / cx / cp — works in any terminal
+	IconLogo                 // the real brand marks, via Kitty graphics
+)
+
+// ResolveIconMode defaults to text: logos need a terminal that composites Kitty
+// graphics, and a wrong guess renders mojibake rather than degrading quietly.
+func ResolveIconMode(mode string) IconMode {
+	if (mode == "logo" || mode == "auto") && LogosSupported() {
+		return IconLogo
+	}
+	return IconText
+}
 
 // LogosSupported reports whether the terminal can composite Kitty graphics.
 // tmux is excluded: it does not pass unicode placeholders through, so a session
@@ -68,7 +87,7 @@ func LogosSupported() bool {
 // visible where placeholder cells reference them, which is what lets the images
 // flow with the text instead of being pinned to screen coordinates.
 func TransmitLogos(w io.Writer) error {
-	for _, a := range AllAgents {
+	for _, a := range session.AllAgents {
 		id := imageID(a)
 		data := base64.StdEncoding.EncodeToString(logoPNG(a))
 
@@ -104,7 +123,7 @@ func TransmitLogos(w io.Writer) error {
 
 // LogoCells renders the placeholder cells for an agent's mark. The foreground
 // colour is not decorative: its RGB channels carry the image id.
-func LogoCells(a Agent, bg string) string {
+func LogoCells(a session.Agent, bg string) string {
 	id := imageID(a)
 	r, g, b := (id>>16)&0xff, (id>>8)&0xff, id&0xff
 
@@ -133,7 +152,7 @@ func ProbeLogos(w io.Writer) error {
 	if err := TransmitLogos(w); err != nil {
 		return err
 	}
-	for _, a := range AllAgents {
+	for _, a := range session.AllAgents {
 		fmt.Fprintf(w, "  %s  %-8s  (text fallback: %s)\n", LogoCells(a, ""), a, a.Tag())
 	}
 	fmt.Fprint(w, "\nIf you see three logos above, run: ORBIT_ICONS=logo orbit\n")
