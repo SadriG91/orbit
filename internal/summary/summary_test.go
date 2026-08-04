@@ -150,3 +150,36 @@ func TestExcerptHalvingCutsOnRuneBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// Each store is read independently and fails quietly — no sqlite3 on PATH and
+// every Copilot session is simply absent from the list. Pruning on that
+// evidence would delete every Copilot summary, each one a paid CLI invocation.
+// An agent that contributed nothing is unknown, not empty.
+func TestPruneLeavesAgentsThatReportedNothingAlone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	claude := &session.Session{Agent: session.Claude, ID: "kept", Msgs: 3}
+	claudeGone := &session.Session{Agent: session.Claude, ID: "deleted", Msgs: 3}
+	copilot := &session.Session{Agent: session.Copilot, ID: "unreadable-store", Msgs: 5}
+	codex := &session.Session{Agent: session.Codex, ID: "also-unreadable", Msgs: 5}
+	for _, s := range []*session.Session{claude, claudeGone, copilot, codex} {
+		save(s, Record{Text: "summary of " + s.ID, CoveredMsgs: s.Msgs})
+	}
+
+	// A scan in which sqlite3 was missing and ~/.codex unreadable: only Claude
+	// sessions came back.
+	Prune([]*session.Session{claude})
+
+	if _, ok := Load(claude); !ok {
+		t.Error("dropped a live session's summary")
+	}
+	if _, ok := Load(claudeGone); ok {
+		t.Error("kept an orphan belonging to an agent that did report in")
+	}
+	if _, ok := Load(copilot); !ok {
+		t.Error("deleted a Copilot summary on the strength of a store that failed to open")
+	}
+	if _, ok := Load(codex); !ok {
+		t.Error("deleted a Codex summary on the strength of a store that failed to open")
+	}
+}

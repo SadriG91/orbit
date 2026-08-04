@@ -283,18 +283,30 @@ func transcriptExcerpt(s *session.Session, maxChars int) (string, error) {
 // Prune drops cache entries for sessions that no longer exist. Entries
 // for sessions that merely moved on are kept — they are the basis of the next
 // incremental update.
+//
+// Only agents that appear in the list are touched. Each store is read
+// independently and fails quietly — no sqlite3 on PATH and every Copilot
+// session is simply absent, an unreadable ~/.claude and every Claude one is —
+// so an agent that contributed nothing is treated as unknown rather than as
+// having no sessions. Every entry here cost a paid CLI invocation to produce,
+// which is far too much to spend on a store that merely failed to open. The
+// cost of being wrong the other way is some stale files on disk.
 func Prune(sessions []*session.Session) {
 	live := map[string]bool{}
+	heard := map[string]bool{}
 	for _, s := range sessions {
 		live[filepath.Base(File(s))] = true
+		heard[s.Agent.String()] = true
 	}
 	entries, err := os.ReadDir(Dir())
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if !live[e.Name()] {
-			os.Remove(filepath.Join(Dir(), e.Name()))
+		agent, _, ok := strings.Cut(e.Name(), "-")
+		if !ok || !heard[agent] || live[e.Name()] {
+			continue
 		}
+		os.Remove(filepath.Join(Dir(), e.Name()))
 	}
 }

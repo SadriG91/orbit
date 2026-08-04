@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sadrig91/orbit/internal/format"
@@ -62,7 +63,7 @@ func Transcripts(sessions []*session.Session, q string) map[string]Match {
 			continue
 		}
 		body := format.Clean(s.Title + " " + s.Last)
-		if i := strings.Index(strings.ToLower(body), q); i >= 0 {
+		if i := indexFold(body, q); i >= 0 {
 			res[s.ID] = Match{SessionID: s.ID, Hits: 1, Snippet: snippetAround(body, i)}
 		}
 	}
@@ -96,7 +97,7 @@ func scanTranscript(path, q string) (Match, bool) {
 		if text == "" {
 			continue
 		}
-		i := strings.Index(strings.ToLower(text), q)
+		i := indexFold(text, q)
 		if i < 0 {
 			continue // matched only inside metadata, not the message body
 		}
@@ -108,14 +109,51 @@ func scanTranscript(path, q string) (Match, bool) {
 	return m, m.Hits > 0
 }
 
+// indexFold reports the byte offset in s at which lower first matches
+// case-insensitively, or -1. lower must already be lower-cased.
+//
+// The offset is valid for s itself, which is the entire point. Indexing into
+// strings.ToLower(s) gives a position in a different string: Go's simple case
+// mapping can change a rune's encoded length — U+212A KELVIN SIGN is three
+// bytes and folds to a one-byte "k" — so every offset past such a rune slides.
+// Using one as an offset into the original is the same class of mistake as
+// measuring before format.Clean and slicing after.
+func indexFold(s, lower string) int {
+	for i := range s { // range visits rune starts, so i is always a boundary
+		if matchesFoldAt(s[i:], lower) {
+			return i
+		}
+	}
+	return -1
+}
+
+// matchesFoldAt compares rune by rune rather than byte by byte, so the two
+// sides may legitimately differ in encoded length.
+func matchesFoldAt(s, lower string) bool {
+	for _, want := range lower {
+		if s == "" {
+			return false
+		}
+		r, size := utf8.DecodeRuneInString(s)
+		if unicode.ToLower(r) != want {
+			return false
+		}
+		s = s[size:]
+	}
+	return true
+}
+
 // containsFold is the cheap reject in front of the JSON unmarshal, so it runs
 // on every line of every transcript. Lower-casing a copy of each line cost two
 // allocations and a full copy per line — roughly twice the corpus in garbage
-// per search — so it folds only the bytes it is comparing.
+// per search — so ASCII text is folded a byte at a time instead.
 //
-// The ASCII path is the one that matters; a non-ASCII query falls back to the
-// allocating version rather than risk rejecting a line that would have matched,
-// since Unicode case folding can change a string's byte length.
+// A bytewise scan cannot see a fold that crosses the ASCII boundary, and a
+// reject filter stricter than the match it guards silently drops lines that do
+// match. So the scan also notes whether it passed a non-ASCII byte, and those
+// lines fall back to the slow, exact answer — but only for a query that could
+// possibly be affected. Noting it in the same pass matters: checking up front
+// cost every non-ASCII line a second traversal on top of the fallback.
 func containsFold(b []byte, lower string) bool {
 	if len(lower) == 0 {
 		return true
@@ -124,16 +162,34 @@ func containsFold(b []byte, lower string) bool {
 		return strings.Contains(strings.ToLower(string(b)), lower)
 	}
 	first := lower[0]
-	for i := 0; i+len(lower) <= len(b); i++ {
-		if foldByte(b[i]) != first {
+	nonASCII := false
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if c >= utf8.RuneSelf {
+			nonASCII = true
+			continue
+		}
+		if foldByte(c) != first || i+len(lower) > len(b) {
 			continue
 		}
 		if hasPrefixFold(b[i:], lower) {
 			return true
 		}
 	}
+	if nonASCII && strings.ContainsAny(lower, foldsFromNonASCII) {
+		return strings.Contains(strings.ToLower(string(b)), lower)
+	}
 	return false
 }
+
+// foldsFromNonASCII are the only ASCII characters a non-ASCII rune can lower
+// to: U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE gives "i", and U+212A KELVIN
+// SIGN gives "k". In the whole of Unicode there are no others, so a query
+// containing neither can trust a bytewise scan even of a line full of non-ASCII
+// text — which is what keeps the common search off the allocating path
+// entirely. TestFoldSourcesFromNonASCIIAreExhaustive walks every rune to keep
+// this true across Unicode table updates.
+const foldsFromNonASCII = "ik"
 
 func foldByte(c byte) byte {
 	if 'A' <= c && c <= 'Z' {

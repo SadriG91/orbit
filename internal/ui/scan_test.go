@@ -88,7 +88,7 @@ func TestScanRunsSafelyAlongsideTheUI(t *testing.T) {
 	m.w, m.h = 120, 30
 
 	// Seed the model, so what the UI renders below is a previous scan's output.
-	m.Update(scan(session.NewIndex(), m.sort))
+	m.Update(scan(session.NewIndex()))
 
 	cmd := m.scanCmd()
 	if cmd == nil {
@@ -133,6 +133,7 @@ func fakeHome(t *testing.T) string {
 // It now runs once, off the first scan — but never against an empty list, since
 // a store that failed to read looks exactly like every session being deleted.
 func TestPruneRunsOnceAndNeverOnAnEmptyList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // never point a prune at a real cache
 	m := New(testConfig(), "inline")
 
 	if cmd := m.pruneCmd(); cmd != nil {
@@ -155,6 +156,7 @@ func TestPruneRunsOnceAndNeverOnAnEmptyList(t *testing.T) {
 // be what triggers the sweep. Prune spent this whole time being correct,
 // tested-adjacent and simply never called.
 func TestScanLandingTriggersThePrune(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // never point a prune at a real cache
 	m := New(testConfig(), "inline")
 	if !m.cfg.Summary.Enabled {
 		t.Skip("summaries disabled in the shipped default")
@@ -166,4 +168,61 @@ func TestScanLandingTriggersThePrune(t *testing.T) {
 	if !m.pruned {
 		t.Error("a scan landing with sessions should have swept the summary cache")
 	}
+}
+
+// The scan no longer sorts; the result is ordered on arrival. Sorting at issue
+// time meant a scan in flight carried a stale mode, and pressing `o` or `p`
+// while one was running was silently undone for up to 2.5s when it landed —
+// with grouping on, leaving the list out of project order under repeated
+// group headers.
+func TestSortChosenDuringAScanSurvivesItsArrival(t *testing.T) {
+	m := New(testConfig(), "inline")
+	m.w, m.h = 120, 30
+
+	cmd := m.scanCmd() // issued while sorting by age
+	if cmd == nil {
+		t.Fatal("scan was not issued")
+	}
+	m.sort = session.SortTokens // `o`, while it is in flight
+
+	now := time.Now()
+	m.Update(scanMsg([]*session.Session{
+		{Agent: session.Claude, ID: "small", Cwd: "/a", Title: "s", Tokens: 10, Modified: now},
+		{Agent: session.Codex, ID: "big", Cwd: "/b", Title: "b", Tokens: 9000, Modified: now.Add(-time.Hour)},
+	}))
+
+	if len(m.view) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(m.view))
+	}
+	if m.view[0].ID != "big" {
+		t.Errorf("landed sorted by %v, not the mode chosen during the scan: got %s first",
+			m.sort, m.view[0].ID)
+	}
+}
+
+// pruneCmd and the search command both read the session slice on another
+// goroutine, while `o` and `p` sort m.all in place on the UI goroutine —
+// swapping elements of the same backing array they are ranging over.
+func TestCommandsDoNotShareTheSortedBackingArray(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := New(testConfig(), "inline")
+	now := time.Now()
+	m.all = []*session.Session{
+		{Agent: session.Claude, ID: "a", Cwd: "/a", Title: "a", Tokens: 1, Modified: now},
+		{Agent: session.Codex, ID: "b", Cwd: "/b", Title: "b", Tokens: 2, Modified: now},
+		{Agent: session.Copilot, ID: "c", Cwd: "/c", Title: "c", Tokens: 3, Modified: now},
+	}
+
+	cmd := m.pruneCmd()
+	if cmd == nil {
+		t.Fatal("prune was not issued")
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); cmd() }()
+
+	// `o`, repeatedly, against the array the command was handed.
+	for i := 0; i < 500; i++ {
+		session.SortSessionsBy(m.all, session.AllSorts[i%len(session.AllSorts)])
+	}
+	<-done
 }

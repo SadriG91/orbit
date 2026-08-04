@@ -171,15 +171,16 @@ func tick() tea.Cmd {
 // Index.files at the same time, which is a fatal concurrent map write, not a
 // benign race. One at a time; a dropped tick costs 2.5 seconds of staleness.
 //
-// The sort mode is captured here, on the UI goroutine, because the scan sorts
-// with it and `o` rebinds it.
+// Sorting is deliberately not done here. The result is ordered on arrival
+// instead, with whatever mode is current then, so pressing `o` or `p` during a
+// scan isn't undone when it lands.
 func (m *Model) scanCmd() tea.Cmd {
 	if m.scanning {
 		return nil
 	}
 	m.scanning = true
-	ix, sortMode := m.ix, m.sort
-	return func() tea.Msg { return scan(ix, sortMode) }
+	ix := m.ix
+	return func() tea.Msg { return scan(ix) }
 }
 
 // refreshCmd is scanCmd for the cases where dropping the request would be
@@ -195,7 +196,7 @@ func (m *Model) refreshCmd() tea.Cmd {
 
 // scan reads every transcript store, joins it with live tmux state, and links
 // sessions started with `n` to whatever transcript they turned out to write.
-func scan(ix *session.Index, sortMode session.SortMode) tea.Msg {
+func scan(ix *session.Index) tea.Msg {
 	sessions := ix.Scan()
 	byID := map[string]*session.Session{}
 	for _, s := range sessions {
@@ -245,7 +246,6 @@ func scan(ix *session.Index, sortMode session.SortMode) tea.Msg {
 	for _, s := range sessions {
 		s.Resolve(now)
 	}
-	session.SortSessionsBy(sessions, sortMode)
 	return scanMsg(sessions)
 }
 
@@ -344,11 +344,22 @@ func (m *Model) pruneCmd() tea.Cmd {
 		return nil
 	}
 	m.pruned = true
-	all := m.all
+	all := snapshot(m.all)
 	return func() tea.Msg {
 		summary.Prune(all)
 		return nil
 	}
+}
+
+// snapshot copies the slice — not the sessions — for a command that will read
+// it on another goroutine. `o` and `p` sort m.all in place, which swaps
+// elements of the very array the command is ranging over. The sessions
+// themselves are never mutated after a scan hands them over, so copying the
+// header is enough.
+func snapshot(ss []*session.Session) []*session.Session {
+	out := make([]*session.Session, len(ss))
+	copy(out, ss)
+	return out
 }
 
 // summariseAll queues every visible session that has no summary yet. The global
@@ -526,6 +537,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasIdle := !m.anyWorking()
 		m.scanning = false
 		m.all = msg
+		// Order it here rather than in the scan, so a sort or grouping chosen
+		// while the scan was in flight survives its arrival instead of being
+		// silently reverted until the next tick.
+		session.SortSessionsBy(m.all, m.sort)
 		m.notify.Update(m.all)
 		m.rebuild()
 		for _, s := range m.all {
@@ -594,7 +609,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.rebuild()
 						return m, nil
 					}
-					all := m.all
+					all := snapshot(m.all)
 					m.say("searching transcripts for " + strconv.Quote(q) + "…")
 					return m, func() tea.Msg {
 						return searchMsg{query: q, matches: search.Transcripts(all, q)}

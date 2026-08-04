@@ -3,9 +3,11 @@ package search
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sadrig91/orbit/internal/session"
@@ -111,5 +113,104 @@ func TestContainsFoldMatchesTheAllocatingVersion(t *testing.T) {
 				t.Errorf("containsFold(%q, %q) = %v, want %v", l, q, got, want)
 			}
 		}
+	}
+}
+
+// The reject filter must never be stricter than the match it guards, or a line
+// that genuinely contains the term is skipped before the body match ever runs.
+// Case folding outside ASCII can map a multi-byte rune onto an ASCII one —
+// U+0130 onto "i", U+212A KELVIN SIGN onto "k" — which the bytewise fast path
+// cannot see.
+func TestContainsFoldNeverRejectsALineTheMatchWouldAccept(t *testing.T) {
+	lines := []string{
+		`{"text":"the Ivanti tunnel keeps dropping"}`,
+		`{"text":"THE IVANTI TUNNEL"}`,
+		`{"text":"İstanbul deploy"}`, // U+0130, folds to "i"
+		"{\"text\":\"K elvin\"}",     // U+212A, folds to "k"
+		"{\"text\":\"212K KELVIN\"}", // U+212A alongside an ASCII K
+		`{"text":"nothing relevant"}`,
+		`{"text":"ıvantı"}`, // dotless i, must not match "ivanti"
+		`{"text":"日本語 ivanti"}`,
+		`{"text":"straße"}`,
+		`{"text":""}`,
+	}
+	queries := []string{"ivanti", "istanbul", "k", "i", "the", "日本語", "é", "straße", "nothing"}
+	for _, q := range queries {
+		for _, l := range lines {
+			want := strings.Contains(strings.ToLower(l), q)
+			if got := containsFold([]byte(l), q); got != want {
+				t.Errorf("containsFold(%q, %q) = %v, want %v", l, q, got, want)
+			}
+		}
+	}
+}
+
+// strings.ToLower is not length-preserving, so an index measured in the lowered
+// string is not an offset into the original — the same class of mistake as
+// measuring before format.Clean and slicing after.
+func TestIndexFoldReturnsAnOffsetIntoTheOriginal(t *testing.T) {
+	for _, c := range []struct{ text, q string }{
+		{"KKK needle here", "needle"}, // U+212A ×3: six bytes of drift
+		{"İstanbul needle", "needle"}, // U+0130: one byte
+		{"plain needle", "needle"},
+		{"NEEDLE upper", "needle"},
+		{"日本語 needle", "needle"},
+	} {
+		i := indexFold(c.text, c.q)
+		if i < 0 {
+			t.Errorf("indexFold(%q, %q) found nothing", c.text, c.q)
+			continue
+		}
+		if got := c.text[i:]; !strings.HasPrefix(strings.ToLower(got), c.q) {
+			t.Errorf("indexFold(%q, %q) = %d, which points at %q", c.text, c.q, i, got)
+		}
+	}
+
+	// It must agree with the lowered-string search on whether there is a match.
+	for _, c := range []struct{ text, q string }{
+		{"İstanbul", "istanbul"}, {"KELVIN", "k"}, {"ıvantı", "ivanti"}, {"none", "zzz"},
+	} {
+		want := strings.Contains(strings.ToLower(c.text), c.q)
+		if got := indexFold(c.text, c.q) >= 0; got != want {
+			t.Errorf("indexFold(%q, %q) matched=%v, want %v", c.text, c.q, got, want)
+		}
+	}
+}
+
+// The snippet has to be centred on the match even when the text ahead of it
+// contains runes whose lowercase is a different length.
+func TestSnippetSurvivesLengthChangingCaseFolds(t *testing.T) {
+	body := strings.Repeat("K", 40) + " and then we fixed the VPN-PROXY setting"
+	i := indexFold(body, "vpn-proxy")
+	if i < 0 {
+		t.Fatal("no match")
+	}
+	snip := snippetAround(body, i)
+	if !strings.Contains(strings.ToLower(snip), "vpn-proxy") {
+		t.Errorf("snippet lost the term: %q", snip)
+	}
+	if !utf8.ValidString(snip) {
+		t.Errorf("snippet is not valid UTF-8: % x", snip)
+	}
+}
+
+// containsFold's fast path is only safe because exactly two ASCII characters
+// are reachable by lowering a non-ASCII rune. If a Unicode table update ever
+// adds a third, the fast path would start silently rejecting lines that match,
+// so pin the assumption rather than trust it.
+func TestFoldSourcesFromNonASCIIAreExhaustive(t *testing.T) {
+	var got []rune
+	seen := map[rune]bool{}
+	for r := rune(utf8.RuneSelf); r <= unicode.MaxRune; r++ {
+		if l := unicode.ToLower(r); l < utf8.RuneSelf && !seen[l] {
+			seen[l] = true
+			got = append(got, l)
+		}
+	}
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	if string(got) != foldsFromNonASCII {
+		t.Errorf("ASCII characters reachable by lowering a non-ASCII rune = %q, "+
+			"but containsFold assumes %q — the fast path is now unsound",
+			string(got), foldsFromNonASCII)
 	}
 }
