@@ -1,4 +1,4 @@
-/orbit
-/dist/
-*.test
 .DS_Store
+*.test
+/dist/
+/orbit

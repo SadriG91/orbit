@@ -1,0 +1,107 @@
+version: 2
+
+project_name: orbit
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - main: ./cmd/orbit
+    binary: orbit
+    # Nothing here needs libc, and a static binary is one less thing that can
+    # differ between the machine that built it and the machine that runs it.
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  # Grouped by what a reader cares about, not by commit order.
+  sort: asc
+  use: github
+  groups:
+    - title: Fixes
+      regexp: '(?i)^.*?(fix|correct|repair)'
+      order: 0
+    - title: Features
+      regexp: '(?i)^.*?(add|support|introduce)'
+      order: 1
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+homebrew_casks:
+  - name: orbit
+    repository:
+      owner: SadriG91
+      name: homebrew-tap
+      # A PAT, because the release runs in the orbit repo and GITHUB_TOKEN
+      # cannot write to a different one.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/SadriG91/orbit
+    description: Dashboard for the Claude Code, Codex and Copilot CLI sessions on your machine
+    license: MIT
+    binaries:
+      - orbit
+    dependencies:
+      # Not optional: orbit runs every agent session on a private tmux server so
+      # that closing a tab detaches instead of killing the work, and refuses to
+      # start without it.
+      - formula: tmux
+    hooks:
+      post:
+        # The binary is downloaded rather than built locally, so macOS marks it
+        # quarantined and Gatekeeper blocks the first run. Nothing here is
+        # notarised, so clear the attribute rather than making every user
+        # discover this for themselves.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+                           args: ["-dr", "com.apple.quarantine", "#{staged_path}/orbit"],
+                           must_succeed: false
+          end
+    # A single line with no newlines at all, deliberately. GoReleaser emits
+    # each line of the caveats as its own Ruby string literal inside
+    # `caveats do ... end`, and a Ruby block evaluates to its last
+    # expression — so anything but the final line is silently dropped.
+    caveats: "Config is written to ~/.config/orbit/ on first run (tmux.conf and config.toml); both are yours to edit. Opening a session in a new Ghostty tab needs Accessibility permission for your terminal — without it, press `i` to attach in the current one instead."
+release:
+  github:
+    owner: SadriG91
+    name: orbit
+  footer: |
+    ## Install
+
+    ```sh
+    brew install sadrig91/tap/orbit
+    ```
+
+    Linux, or without Homebrew:
+
+    ```sh
+    go install github.com/sadrig91/orbit/cmd/orbit@{{ .Tag }}
+    ```
+
+    Requires tmux.

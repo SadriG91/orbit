@@ -1,0 +1,39 @@
+name: release
+
+# Tag-driven: pushing v* is the whole release process. Everything else —
+# building for four platforms, checksums, notes, publishing, and updating the
+# Homebrew tap — happens here, so none of it can be half-done or forgotten.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub release
+
+jobs:
+  release:
+    # Built on macOS because that is the primary target and the platform the
+    # integration tests actually exercise; the binaries themselves are
+    # cross-compiled and static.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # changelog needs the history
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: true
+
+      - name: install tmux
+        run: brew install tmux # the pre-release test hook needs it
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Scoped to the tap repo only. GITHUB_TOKEN cannot write to it.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

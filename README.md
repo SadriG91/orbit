@@ -39,13 +39,32 @@ been sitting on a permission prompt for ten minutes. orbit is that missing view.
 
 ## Install
 
+macOS, via Homebrew — a prebuilt binary, nothing to compile:
+
 ```sh
-brew install tmux
-go install github.com/sadrig91/orbit@latest
+brew install sadrig91/tap/orbit
 ```
 
-Requires macOS or Linux, Go 1.25+, and tmux. [Ghostty](https://ghostty.org) is
-optional but gets you tab spawning and desktop notifications.
+Linux, or without Homebrew:
+
+```sh
+go install github.com/sadrig91/orbit/cmd/orbit@latest
+```
+
+Or download a binary for your platform from
+[Releases](https://github.com/SadriG91/orbit/releases).
+
+tmux is required either way. [Ghostty](https://ghostty.org) is optional but
+gets you tab spawning and desktop notifications.
+
+### Releasing
+
+Pushing a `v*` tag is the whole process: CI cross-compiles for macOS and Linux
+on both architectures, publishes the archives and checksums with generated
+notes, and updates the Homebrew cask in
+[SadriG91/homebrew-tap](https://github.com/SadriG91/homebrew-tap). It needs a
+`HOMEBREW_TAP_TOKEN` secret, because the release runs in this repo and
+`GITHUB_TOKEN` cannot write to a different one.
 
 ## Keys
 
