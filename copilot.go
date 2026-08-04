@@ -25,7 +25,10 @@ SELECT s.id, COALESCE(s.cwd,''), COALESCE(s.branch,''), COALESCE(s.summary,''),
                  ORDER BY t.turn_index DESC LIMIT 1), ''),
        COALESCE((SELECT LENGTH(COALESCE(t.assistant_response,'')) FROM turns t
                  WHERE t.session_id = s.id ORDER BY t.turn_index DESC LIMIT 1), 0),
-       COALESCE((SELECT MAX(t.timestamp) FROM turns t WHERE t.session_id = s.id), '')
+       COALESCE((SELECT MAX(t.timestamp) FROM turns t WHERE t.session_id = s.id), ''),
+       COALESCE((SELECT SUM(COALESCE(u.input_tokens,0) + COALESCE(u.output_tokens,0)
+                          + COALESCE(u.cache_read_tokens,0) + COALESCE(u.cache_write_tokens,0))
+                 FROM assistant_usage_events u WHERE u.session_id = s.id), 0)
 FROM sessions s ORDER BY s.updated_at DESC;`
 
 func copilotTime(s string) time.Time {
@@ -64,7 +67,7 @@ func (ix *Index) scanCopilot() []*Session {
 	var res []*Session
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Split(line, "\x1f")
-		if len(f) < 9 || f[0] == "" {
+		if len(f) < 10 || f[0] == "" {
 			continue
 		}
 		cwd := f[1]
@@ -82,6 +85,7 @@ func (ix *Index) scanCopilot() []*Session {
 			mod = turned
 		}
 		respLen, _ := strconv.Atoi(f[7])
+		tokens, _ := strconv.ParseInt(f[9], 10, 64)
 		s := &Session{
 			Agent:    Copilot,
 			ID:       f[0],
@@ -90,6 +94,7 @@ func (ix *Index) scanCopilot() []*Session {
 			Title:    f[3],
 			Last:     f[6],
 			Msgs:     msgs,
+			Tokens:   tokens,
 			Modified: mod,
 		}
 		// No event stream to read: a turn with an assistant response written back

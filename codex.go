@@ -42,6 +42,11 @@ type codexRecord struct {
 		Git       *struct {
 			Branch string `json:"branch"`
 		} `json:"git"`
+		Info *struct {
+			TotalTokenUsage *struct {
+				TotalTokens int64 `json:"total_tokens"`
+			} `json:"total_token_usage"`
+		} `json:"info"`
 	} `json:"payload"`
 }
 
@@ -91,6 +96,12 @@ func parseCodex(path string, mod time.Time) *Session {
 			case "agent_message":
 				s.Msgs++
 				s.hint = HintBusy
+			case "token_count":
+				// Cumulative for the session, so the last one wins rather
+				// than accumulating across events.
+				if i := r.Payload.Info; i != nil && i.TotalTokenUsage != nil {
+					s.Tokens = i.TotalTokenUsage.TotalTokens
+				}
 			case "task_started":
 				s.hint = HintBusy
 			case "task_complete", "turn_aborted":

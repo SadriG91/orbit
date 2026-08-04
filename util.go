@@ -63,6 +63,28 @@ func itoa(n int) string {
 	return string(b)
 }
 
+// humanTokens keeps the column narrow: these run to hundreds of millions once
+// cache reads are counted, and the exact figure never matters at a glance.
+func humanTokens(n int64) string {
+	switch {
+	case n <= 0:
+		return ""
+	case n < 1000:
+		return itoa(int(n))
+	case n < 1_000_000:
+		return itoa(int(n/1000)) + "k"
+	case n < 100_000_000:
+		v := float64(n) / 1_000_000
+		whole := int(v)
+		frac := int((v - float64(whole)) * 10)
+		if whole < 10 && frac > 0 {
+			return itoa(whole) + "." + itoa(frac) + "M"
+		}
+		return itoa(whole) + "M"
+	}
+	return itoa(int(n/1_000_000)) + "M"
+}
+
 // clean strips control characters that would corrupt the layout when echoing
 // captured pane output or a pasted prompt back into the UI.
 func clean(s string) string {

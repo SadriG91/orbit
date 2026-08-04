@@ -51,6 +51,12 @@ type claudeRecord struct {
 	Message     *struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
+		Usage   *struct {
+			Input       int64 `json:"input_tokens"`
+			Output      int64 `json:"output_tokens"`
+			CacheRead   int64 `json:"cache_read_input_tokens"`
+			CacheCreate int64 `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
 	} `json:"message"`
 }
 
@@ -104,6 +110,9 @@ func parseClaude(path string, mod time.Time) *Session {
 				lastStamp = r.Timestamp
 			}
 			blocks := blockTypes(r.Message.Content)
+			if u := r.Message.Usage; u != nil {
+				s.Tokens += u.Input + u.Output + u.CacheRead + u.CacheCreate
+			}
 			if r.Type == "assistant" {
 				s.Msgs++
 				if has(blocks, "tool_use") {

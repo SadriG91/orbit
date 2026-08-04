@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +62,13 @@ type (
 	scanMsg    []*Session
 	previewMsg struct{ name, text string }
 	statusMsg  string
+	searchMsg  struct {
+		query   string
+		matches map[string]Match
+	}
+	summaryMsg struct {
+		id, text, err string
+	}
 	// sendLogosMsg fires once the alt screen exists — see logosCmd.
 	sendLogosMsg struct{}
 	// readyMsg says a tmux session now exists and is waiting to be attached.
@@ -91,17 +99,30 @@ type model struct {
 	mode        attachMode
 	icons       IconMode
 	logosSent   bool
-	notify      *Notifier
+	cfg         Config
+	sort        SortMode
+	group       bool
+
+	searching bool
+	query     string            // the committed full-text query
+	matches   map[string]Match  // session id -> where it matched
+	summaries map[string]string // session id -> cached or generated summary
+	pending   map[string]bool   // summaries currently being generated
+	notify    *Notifier
 }
 
-func newModel(mode attachMode) *model {
+func newModel(cfg Config, mode attachMode) *model {
 	ti := textinput.New()
 	ti.Prompt = "/"
 	ti.Placeholder = "filter"
-	ti.CharLimit = 60
+	ti.CharLimit = 80
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(cBright)
-	return &model{ix: NewIndex(), filter: ti, spin: sp, mode: mode, icons: ResolveIconMode()}
+	return &model{
+		ix: NewIndex(), filter: ti, spin: sp, mode: mode,
+		cfg: cfg, icons: cfg.iconMode(), sort: cfg.sortMode(), group: cfg.Group,
+		summaries: map[string]string{}, pending: map[string]bool{},
+	}
 }
 
 func (m *model) Init() tea.Cmd {
@@ -170,7 +191,7 @@ func (m *model) scan() tea.Msg {
 	for _, s := range sessions {
 		s.resolve(now)
 	}
-	sortSessions(sessions)
+	sortSessionsBy(sessions, m.sort)
 	return scanMsg(sessions)
 }
 
@@ -192,7 +213,7 @@ func (m *model) sel() *Session {
 
 func (m *model) rebuild() {
 	q := strings.ToLower(strings.TrimSpace(m.filter.Value()))
-	cutoff := time.Now().AddDate(0, 0, -30)
+	cutoff := time.Now().AddDate(0, 0, -m.cfg.RecentDays)
 	var keep *Session
 	if s := m.sel(); s != nil {
 		keep = s
@@ -201,6 +222,11 @@ func (m *model) rebuild() {
 	for _, s := range m.all {
 		if !m.showAll && !s.Live() {
 			if s.Modified.Before(cutoff) || s.Title == "" {
+				continue
+			}
+		}
+		if m.query != "" {
+			if _, hit := m.matches[s.ID]; !hit {
 				continue
 			}
 		}
@@ -223,6 +249,31 @@ func (m *model) rebuild() {
 	}
 	if m.cursor >= len(m.view) {
 		m.cursor = max(0, len(m.view)-1)
+	}
+}
+
+// summarise kicks off a provider CLI in the background. It takes seconds, so
+// the UI stays responsive and the result arrives as a message.
+func (m *model) summarise(s *Session) tea.Cmd {
+	if !m.cfg.Summary.Enabled {
+		return func() tea.Msg { return statusMsg("summaries are disabled in config") }
+	}
+	if _, have := m.summaries[s.ID]; have {
+		return nil
+	}
+	if m.pending[s.ID] {
+		return nil
+	}
+	m.pending[s.ID] = true
+	m.say("summarising with " + s.Agent.String() + "…")
+	cfg, sess := m.cfg.Summary, s
+	return func() tea.Msg {
+		text, err := GenerateSummary(sess, cfg)
+		out := summaryMsg{id: sess.ID, text: text}
+		if err != nil {
+			out.err = err.Error()
+		}
+		return out
 	}
 }
 
@@ -265,11 +316,41 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(m.scan, m.capture(), tick())
 
+	case searchMsg:
+		m.query, m.matches = msg.query, msg.matches
+		m.rebuild()
+		m.say(itoa(len(msg.matches)) + " sessions mention " + strconv.Quote(msg.query))
+		return m, nil
+
+	case summaryMsg:
+		delete(m.pending, msg.id)
+		if msg.err != "" {
+			m.say("summary failed: " + msg.err)
+			return m, nil
+		}
+		m.summaries[msg.id] = msg.text
+		return m, nil
+
 	case scanMsg:
 		wasIdle := !m.anyWorking()
 		m.all = msg
 		m.notify.Update(m.all)
 		m.rebuild()
+		for _, s := range m.all {
+			if _, have := m.summaries[s.ID]; have {
+				continue
+			}
+			if text, ok := CachedSummary(s); ok {
+				m.summaries[s.ID] = text
+			}
+		}
+		if m.cfg.Summary.Auto {
+			if sel := m.sel(); sel != nil {
+				if _, have := m.summaries[sel.ID]; !have {
+					return m, m.summarise(sel)
+				}
+			}
+		}
 		if wasIdle && m.anyWorking() {
 			return m, m.spin.Tick // restart the animation loop
 		}
@@ -309,10 +390,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				m.filtering = false
 				m.filter.Blur()
+				if m.searching {
+					q := strings.TrimSpace(m.filter.Value())
+					m.searching = false
+					m.filter.SetValue("")
+					m.filter.Prompt = "/"
+					if q == "" {
+						m.query, m.matches = "", nil
+						m.rebuild()
+						return m, nil
+					}
+					all := m.all
+					m.say("searching transcripts for " + strconv.Quote(q) + "…")
+					return m, func() tea.Msg {
+						return searchMsg{query: q, matches: SearchTranscripts(all, q)}
+					}
+				}
 			default:
 				var cmd tea.Cmd
 				m.filter, cmd = m.filter.Update(msg)
-				m.rebuild()
+				if !m.searching {
+					m.rebuild() // quick filter is live; full-text waits for enter
+				}
 				return m, cmd
 			}
 			return m, nil
@@ -343,9 +442,46 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.cursor = max(0, len(m.view)-1)
 		return m, m.capture()
 	case "/":
+		m.searching = false
 		m.filtering = true
+		m.filter.Prompt = "/"
+		m.filter.Placeholder = "filter titles and paths"
 		m.filter.Focus()
 		return m, textinput.Blink
+	case "f":
+		m.searching = true
+		m.filtering = true
+		m.filter.Prompt = "search: "
+		m.filter.Placeholder = "text inside transcripts"
+		m.filter.SetValue("")
+		m.filter.Focus()
+		return m, textinput.Blink
+	case "o":
+		m.sort = AllSorts[(int(m.sort)+1)%len(AllSorts)]
+		sortSessionsBy(m.all, m.sort)
+		m.rebuild()
+		m.say("sorted by " + m.sort.String())
+		return m, nil
+	case "p":
+		m.group = !m.group
+		if m.group {
+			m.sort = SortProject
+			sortSessionsBy(m.all, m.sort)
+			m.rebuild()
+		}
+		return m, nil
+	case "s":
+		if sel := m.sel(); sel != nil {
+			return m, m.summarise(sel)
+		}
+		return m, nil
+	case "esc":
+		if m.query != "" {
+			m.query, m.matches = "", nil
+			m.rebuild()
+			m.say("search cleared")
+		}
+		return m, nil
 	case "a":
 		m.showAll = !m.showAll
 		m.rebuild()

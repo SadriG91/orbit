@@ -10,7 +10,7 @@ import (
 // regressions show up without needing a terminal.
 func TestViewRenders(t *testing.T) {
 	now := time.Now()
-	m := newModel(attachInline)
+	m := newModel(testConfig(), attachInline)
 	m.w, m.h = 120, 30
 	m.all = []*Session{
 		{Agent: Claude, ID: "aaaaaaaa-1", Cwd: home("work", "api-gateway"), Branch: "batch-runner",
@@ -59,7 +59,7 @@ func TestViewRenders(t *testing.T) {
 
 func TestFilterAndDetail(t *testing.T) {
 	now := time.Now()
-	m := newModel(attachInline)
+	m := newModel(testConfig(), attachInline)
 	m.w, m.h = 120, 30
 	m.all = []*Session{
 		{Agent: Claude, ID: "a", Cwd: home("work", "api-gateway"), Title: "Refactor batch runner", Modified: now},
@@ -77,7 +77,7 @@ func TestFilterAndDetail(t *testing.T) {
 }
 
 func TestOldUntitledHiddenUntilShowAll(t *testing.T) {
-	m := newModel(attachInline)
+	m := newModel(testConfig(), attachInline)
 	m.w, m.h = 120, 30
 	m.all = []*Session{
 		{Agent: Claude, ID: "old", Cwd: home(), Title: "", Modified: time.Now().AddDate(0, 0, -60)},
@@ -117,6 +117,15 @@ func assertFrame(t *testing.T, m *model, frame string) {
 	if !joined {
 		t.Error("session row wrapped: title and state label landed on different lines")
 	}
+}
+
+// testConfig is the shipped default, so the tests exercise what users get.
+func testConfig() Config {
+	cfg, err := LoadConfigDefaults()
+	if err != nil {
+		panic(err)
+	}
+	return cfg
 }
 
 func stripANSI(s string) string {

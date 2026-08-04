@@ -55,6 +55,10 @@ optional but gets you tab spawning and desktop notifications.
 | `i`     | attach in this terminal; returns to orbit when you detach  |
 | `t`     | attach in a new Ghostty tab                                |
 | `w`     | attach in a new Ghostty window                             |
+| `s`     | summarise this session with a cheap model, then cache it   |
+| `f`     | full-text search inside transcripts                        |
+| `o`     | cycle sort: age / tokens / project / agent                 |
+| `p`     | group the list under project headings                      |
 | `n`     | new session, same agent, in the selected project's dir     |
 | `1/2/3` | new claude / codex / copilot session in that dir           |
 | `x`     | kill the tmux session (the transcript is untouched)        |
@@ -64,6 +68,33 @@ optional but gets you tab spawning and desktop notifications.
 | `q`     | quit the dashboard — running sessions carry on             |
 
 `⏎` picks the best available: a Ghostty tab on macOS, otherwise in-place.
+`/` filters titles and paths as you type; `f` searches message bodies and runs
+on Enter. `esc` clears a search.
+
+## Search and summaries
+
+Titles are terse — "Check branch status against main" doesn't say which branch —
+so `f` searches the transcript bodies themselves and shows the matching text in
+the detail pane. Nothing is held in memory; the files are scanned on demand,
+which across ~80 sessions takes under 200ms.
+
+`s` summarises a session in two or three sentences and caches the result. The
+cache key includes the session's last event, so a summary is computed once per
+conversation state and quietly regenerates if you continue the session.
+
+Summaries run through each provider's **own CLI** in non-interactive mode
+(`claude -p`, `codex exec`, `copilot -p`), so the work is billed to that agent's
+existing subscription and orbit needs no API keys. The command is configurable
+per provider — point it at the cheapest model each one offers, since this is a
+summarising job rather than a reasoning one:
+
+```toml
+[summary.claude]
+command = ["claude", "-p", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
+```
+
+Set `auto = true` under `[summary]` to summarise whatever you're sitting on
+without pressing `s`. It's off by default because it spends tokens as you browse.
 
 ## State
 
@@ -74,6 +105,10 @@ optional but gets you tab spawning and desktop notifications.
 | `●`  | working                                                        |
 | `○`  | tmux session alive, but the agent has exited (just a shell)    |
 | `·`  | not running — `⏎` resumes it                                   |
+
+Each row also carries the session's token usage, read from whatever the agent
+recorded — Claude's per-message `usage`, Codex's `total_token_usage`, Copilot's
+`assistant_usage_events` table. `o` sorts by it.
 
 State comes from joining each agent's own transcript with live tmux facts. For
 Claude and Codex that's precise enough to tell "running a slow tool" apart from
@@ -125,11 +160,11 @@ spawning a detached one. It needs Accessibility permission; without it, use `i`.
 
 ## Config
 
-| env                 | default | meaning                                   |
-|---------------------|---------|-------------------------------------------|
-| `ORBIT_SPAWN_DELAY` | `900ms` | wait before typing into a new tmux pane    |
-| `ORBIT_TAB_DELAY`   | `1s`    | wait before typing into a new Ghostty tab  |
-| `ORBIT_ICONS`       | `text`  | `logo` for real brand marks, `auto` to use them where supported |
+`~/.config/orbit/config.toml` is written with annotated defaults on first run:
+icons, attach behaviour, notifications, `recent_days`, sort order, grouping,
+spawn delays and the per-provider summary commands. Environment variables
+(`ORBIT_ICONS`, `ORBIT_SPAWN_DELAY`, `ORBIT_TAB_DELAY`) still win over the file,
+so a single run can be changed without editing it.
 
 ### Agent logos
 
@@ -151,7 +186,7 @@ Artwork is from [Simple Icons](https://simpleicons.org) (CC0), recoloured for a
 dark terminal. Trademarks belong to their respective owners; the marks identify
 which agent owns a session and imply no affiliation or endorsement.
 
-Flags: `--inline`, `--window`, `--no-notify`, `--list`, `--version`.
+Flags: `--inline`, `--window`, `--no-notify`, `--list`, `--json`, `--probe-logos`, `--version`.
 
 ## License
 

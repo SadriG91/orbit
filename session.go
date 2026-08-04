@@ -142,6 +142,7 @@ type Session struct {
 	Title    string
 	Last     string // last thing you typed
 	Msgs     int
+	Tokens   int64
 	Modified time.Time
 
 	hint  Hint
@@ -225,6 +226,29 @@ func (s *Session) resolve(now time.Time) {
 	default:
 		s.State = Working
 	}
+}
+
+type SortMode int
+
+const (
+	SortAge SortMode = iota
+	SortTokens
+	SortProject
+	SortAgent
+)
+
+var AllSorts = []SortMode{SortAge, SortTokens, SortProject, SortAgent}
+
+func (s SortMode) String() string {
+	switch s {
+	case SortTokens:
+		return "tokens"
+	case SortProject:
+		return "project"
+	case SortAgent:
+		return "agent"
+	}
+	return "age"
 }
 
 // Index caches parsed sessions. File-backed transcripts are re-read only when
@@ -326,6 +350,35 @@ func eventTime(stamp string, fallback time.Time) time.Time {
 func home(rest ...string) string {
 	h, _ := os.UserHomeDir()
 	return filepath.Join(append([]string{h}, rest...)...)
+}
+
+func sortSessionsBy(ss []*Session, mode SortMode) {
+	sortSessions(ss) // state first, recency within it
+	if mode == SortAge {
+		return
+	}
+	sort.SliceStable(ss, func(i, j int) bool {
+		a, b := ss[i], ss[j]
+		// Anything live stays pinned to the top whatever the sort.
+		if a.Live() != b.Live() {
+			return a.Live()
+		}
+		switch mode {
+		case SortTokens:
+			if a.Tokens != b.Tokens {
+				return a.Tokens > b.Tokens
+			}
+		case SortProject:
+			if a.Cwd != b.Cwd {
+				return a.Cwd < b.Cwd
+			}
+		case SortAgent:
+			if a.Agent != b.Agent {
+				return a.Agent < b.Agent
+			}
+		}
+		return a.Modified.After(b.Modified)
+	})
 }
 
 func sortSessions(ss []*Session) {

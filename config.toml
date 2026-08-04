@@ -1,0 +1,49 @@
+# orbit configuration. Delete any key to fall back to its default.
+# Environment variables (ORBIT_ICONS, ORBIT_SPAWN_DELAY, ...) still win over
+# this file, so you can override a setting for one run without editing it.
+
+# text | logo | auto   — logo needs a terminal that speaks Kitty graphics
+icons = "text"
+
+# smart | tab | window | inline   — what Enter does
+attach = "smart"
+
+# Desktop notification when a session starts wanting your attention.
+notify = true
+
+# Sessions older than this are hidden until you press `a`.
+recent_days = 30
+
+# age | tokens | project | agent   — press `o` to cycle at runtime
+sort = "age"
+
+# Group the list under project headings.
+group = false
+
+# Give the shell time to start before typing into it.
+spawn_delay = "900ms"
+tab_delay = "1s"
+
+[summary]
+# Summaries are generated on demand and cached, keyed by the session's last
+# event — so a summary is only ever computed once per conversation state.
+enabled = true
+
+# Summarise whichever session you're sitting on, without pressing `s`.
+# Off by default: it spends tokens as you browse.
+auto = false
+
+max_chars = 420
+
+# One command per provider, so each summary is billed to that agent's own
+# subscription and no API keys are needed. The transcript excerpt arrives on
+# stdin; the command should print a summary to stdout. Pick the cheapest model
+# each provider offers — this is a summarising job, not a reasoning one.
+[summary.claude]
+command = ["claude", "-p", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
+
+[summary.codex]
+command = ["codex", "exec", "--model", "gpt-5-mini", "--sandbox", "read-only", "--skip-git-repo-check"]
+
+[summary.copilot]
+command = ["copilot", "-p", "-s", "--no-ask-user", "--available-tools", ""]

@@ -46,6 +46,9 @@ var (
 			Padding(0, 1)
 
 	paneLabel = lipgloss.NewStyle().Foreground(cGreen).Bold(true)
+	sTok      = lipgloss.NewStyle().Foreground(lipgloss.Color("101"))
+	sGroup    = lipgloss.NewStyle().Foreground(cGreen).Bold(true)
+	sHit      = lipgloss.NewStyle().Foreground(cAmber)
 	tagline   = lipgloss.NewStyle().Foreground(cDim).Italic(true)
 	keyCap    = lipgloss.NewStyle().Foreground(cInk).Background(cGreen).Bold(true).Padding(0, 1)
 	keyLabel  = lipgloss.NewStyle().Foreground(cMid)
@@ -103,7 +106,11 @@ func (m *model) render() string {
 	if m.showAll {
 		scope = "all"
 	}
-	body := titledPane("sessions · "+scope, m.list(listBoxW-chrome, bodyH-3), listBoxW, bodyH)
+	label := "sessions · " + scope + " · by " + m.sort.String()
+	if m.query != "" {
+		label = "search · " + m.query
+	}
+	body := titledPane(label, m.list(listBoxW-chrome, bodyH-3), listBoxW, bodyH)
 
 	if detBoxW > 0 {
 		label := "detail"
@@ -251,8 +258,16 @@ func (m *model) list(w, h int) []string {
 	}
 
 	var out []string
+	lastGroup := ""
 	for i := m.top; i < len(m.view) && i < m.top+rows; i++ {
-		out = append(out, m.row(m.view[i], i == m.cursor, w)...)
+		s := m.view[i]
+		if m.group {
+			if g := s.ShortCwd(); g != lastGroup {
+				lastGroup = g
+				out = append(out, sGroup.Render("▸ "+truncate(g, w-2)))
+			}
+		}
+		out = append(out, m.row(s, i == m.cursor, w)...)
 	}
 	// A scroll hint beats silently truncating the list.
 	if more := len(m.view) - (m.top + rows); more > 0 && len(out) < h {
@@ -336,12 +351,37 @@ func (m *model) detail(w, h int) []string {
 	if s.Msgs > 0 {
 		meta = append(meta, sMid.Render(itoa(s.Msgs)+" msgs"))
 	}
+	if t := humanTokens(s.Tokens); t != "" {
+		meta = append(meta, sTok.Render(t+" tokens"))
+	}
 	meta = append(meta, sMid.Render(relTime(s.Modified)+" ago"))
 	line := strings.Join(meta, sDim.Render(" · "))
 	if lbl := s.State.Label(); lbl != "" {
 		line += "  " + pill(s.State.Icon(), lbl, stateColor(s.State))
 	}
 	add(line, "")
+
+	if sum, ok := m.summaries[s.ID]; ok {
+		add(paneLabel.Render("▸ summary"))
+		for _, l := range wrap(clean(sum), w-2) {
+			add("  " + sName.Render(l))
+		}
+		add("")
+	} else if m.pending[s.ID] {
+		add(paneLabel.Render("▸ summary"))
+		add("  " + sDim.Render(m.spin.View()+" generating with "+s.Agent.String()+"…"))
+		add("")
+	} else if m.cfg.Summary.Enabled {
+		add(sDim.Render("press s to summarise this session"), "")
+	}
+
+	if hit, ok := m.matches[s.ID]; ok && hit.Snippet != "" {
+		add(paneLabel.Render("▸ match") + sDim.Render("  "+itoa(hit.Hits)+" hits"))
+		for _, l := range wrap(hit.Snippet, w-2) {
+			add("  " + sHit.Render(l))
+		}
+		add("")
+	}
 
 	if s.Last != "" {
 		add(paneLabel.Render("▸ last prompt"))
@@ -393,8 +433,9 @@ func (m *model) footer() string {
 		return " " + st.Render("▸ "+m.status)
 	}
 	keys := [][2]string{
-		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"1/2/3", "agent"},
-		{"x", "kill"}, {"/", "filter"}, {"a", "all"}, {"q", "quit"},
+		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"s", "summary"},
+		{"f", "search"}, {"/", "filter"}, {"o", "sort"}, {"p", "group"},
+		{"x", "kill"}, {"a", "all"}, {"q", "quit"},
 	}
 	if canSpawnTab() {
 		keys = append(keys[:2], append([][2]string{{"w", "window"}}, keys[2:]...)...)
