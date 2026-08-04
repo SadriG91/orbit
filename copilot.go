@@ -24,8 +24,18 @@ SELECT s.id, COALESCE(s.cwd,''), COALESCE(s.branch,''), COALESCE(s.summary,''),
        COALESCE((SELECT t.user_message FROM turns t WHERE t.session_id = s.id
                  ORDER BY t.turn_index DESC LIMIT 1), ''),
        COALESCE((SELECT LENGTH(COALESCE(t.assistant_response,'')) FROM turns t
-                 WHERE t.session_id = s.id ORDER BY t.turn_index DESC LIMIT 1), 0)
+                 WHERE t.session_id = s.id ORDER BY t.turn_index DESC LIMIT 1), 0),
+       COALESCE((SELECT MAX(t.timestamp) FROM turns t WHERE t.session_id = s.id), '')
 FROM sessions s ORDER BY s.updated_at DESC;`
+
+func copilotTime(s string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
 
 func (ix *Index) scanCopilot() []*Session {
 	db := home(".copilot", "session-store.db")
@@ -54,7 +64,7 @@ func (ix *Index) scanCopilot() []*Session {
 	var res []*Session
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Split(line, "\x1f")
-		if len(f) < 8 || f[0] == "" {
+		if len(f) < 9 || f[0] == "" {
 			continue
 		}
 		cwd := f[1]
@@ -65,9 +75,11 @@ func (ix *Index) scanCopilot() []*Session {
 		if msgs == 0 && f[3] == "" {
 			continue // never actually used
 		}
-		mod, err := time.Parse(time.RFC3339, f[4])
-		if err != nil {
-			mod, _ = time.Parse("2006-01-02 15:04:05", f[4])
+		// sessions.updated_at is not reliably maintained — turns can be days
+		// newer than it — so the session is dated by whichever is later.
+		mod := copilotTime(f[4])
+		if turned := copilotTime(f[8]); turned.After(mod) {
+			mod = turned
 		}
 		respLen, _ := strconv.Atoi(f[7])
 		s := &Session{
