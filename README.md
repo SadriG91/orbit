@@ -169,6 +169,15 @@ typing into an interactive login shell rather than via `new-session <cmd>`,
 because agents are often shell functions or version-manager shims that don't
 exist in a bare `sh -c`.
 
+Session state is read back with one `list-sessions -F`, and tmux is fussier
+about that than it looks. Older versions (3.4, which Debian and Ubuntu 24.04
+ship) escape control characters in command output, so the `\x1f` field
+separator arrives as the literal `\037` — the parser takes either. Every
+invocation also passes `-u`, without which tmux replaces multi-byte characters
+with `_` for any client whose locale it doesn't like, mangling the `·` in tab
+titles and leaving orbit re-titling every session on every tick because the
+title it wrote never matches the one it reads.
+
 **Tab titles** are pushed as `<short pwd> · <session title>` through tmux's
 `set-titles`, configured to ignore `pane_title` so agents can't overwrite them.
 

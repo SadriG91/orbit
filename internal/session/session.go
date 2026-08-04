@@ -246,13 +246,28 @@ type cached struct {
 
 func NewIndex() *Index { return &Index{files: map[string]cached{}} }
 
+// Scan reads every store and returns a fresh snapshot of what it found.
+//
+// The sessions it hands back are copies, deliberately. The cache reuses parsed
+// *Session values across scans, and the caller goes on to write to what it gets
+// (Tmux, State) and to render it — while the next scan is already running.
+// Handing out the cached values directly would have the UI reading fields a
+// scan is concurrently writing. Session holds no mutable references — Tmux is
+// replaced wholesale on every scan, never mutated in place — so a shallow copy
+// is a complete one.
 func (ix *Index) Scan() []*Session {
 	ix.Errs = nil
 	var out []*Session
 	out = append(out, ix.scanClaude()...)
 	out = append(out, ix.scanCodex()...)
 	out = append(out, ix.scanCopilot()...)
-	return out
+
+	snap := make([]*Session, len(out))
+	for i, s := range out {
+		c := *s
+		snap[i] = &c
+	}
+	return snap
 }
 
 // scanPaths reads transcripts through the cache, parsing misses in parallel.

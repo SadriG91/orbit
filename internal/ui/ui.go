@@ -111,6 +111,10 @@ type Model struct {
 	sort        session.SortMode
 	group       bool
 
+	scanning bool // a scan is in flight; see scanCmd
+	rescan   bool // an explicit refresh arrived mid-scan and owes us another
+	pruned   bool // the summary cache has been swept once, after the first scan
+
 	searching bool
 	query     string                    // the committed full-text query
 	matches   map[string]search.Match   // session id -> where it matched
@@ -146,7 +150,7 @@ func New(cfg config.Config, attachOverride string) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.scan, tick(), m.spin.Tick)
+	return tea.Batch(m.scanCmd(), tick(), m.spin.Tick)
 }
 
 // logosCmd waits for the first frame to have been painted — and with it the
@@ -159,10 +163,41 @@ func tick() tea.Cmd {
 	return tea.Tick(2500*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
+// scanCmd issues a scan, unless one is already running.
+//
+// Bubble Tea runs batched commands concurrently, and the tick that starts a
+// scan re-arms itself whether or not the previous scan finished — over a few
+// hundred transcripts on a cold start, it won't have. Two scans in flight write
+// Index.files at the same time, which is a fatal concurrent map write, not a
+// benign race. One at a time; a dropped tick costs 2.5 seconds of staleness.
+//
+// Sorting is deliberately not done here. The result is ordered on arrival
+// instead, with whatever mode is current then, so pressing `o` or `p` during a
+// scan isn't undone when it lands.
+func (m *Model) scanCmd() tea.Cmd {
+	if m.scanning {
+		return nil
+	}
+	m.scanning = true
+	ix := m.ix
+	return func() tea.Msg { return scan(ix) }
+}
+
+// refreshCmd is scanCmd for the cases where dropping the request would be
+// visible — a manual `r`, or the settling scan after a kill or an attach. If a
+// scan is already running it is remembered and reissued when that one lands.
+func (m *Model) refreshCmd() tea.Cmd {
+	if m.scanning {
+		m.rescan = true
+		return nil
+	}
+	return m.scanCmd()
+}
+
 // scan reads every transcript store, joins it with live tmux state, and links
 // sessions started with `n` to whatever transcript they turned out to write.
-func (m *Model) scan() tea.Msg {
-	sessions := m.ix.Scan()
+func scan(ix *session.Index) tea.Msg {
+	sessions := ix.Scan()
 	byID := map[string]*session.Session{}
 	for _, s := range sessions {
 		// Sessions come from a cache and are reused across ticks, so last
@@ -211,7 +246,6 @@ func (m *Model) scan() tea.Msg {
 	for _, s := range sessions {
 		s.Resolve(now)
 	}
-	session.SortSessionsBy(sessions, m.sort)
 	return scanMsg(sessions)
 }
 
@@ -299,6 +333,33 @@ func (m *Model) shouldAutoSummarise(s *session.Session) bool {
 		minNew = 8
 	}
 	return rec.Behind(s) >= minNew
+}
+
+// pruneCmd sweeps cached summaries whose sessions are gone. It runs once, after
+// the first scan has established what still exists, and never on an empty list:
+// a store that failed to read would otherwise be indistinguishable from every
+// session having been deleted, and the whole cache would go with it.
+func (m *Model) pruneCmd() tea.Cmd {
+	if m.pruned || !m.cfg.Summary.Enabled || len(m.all) == 0 {
+		return nil
+	}
+	m.pruned = true
+	all := snapshot(m.all)
+	return func() tea.Msg {
+		summary.Prune(all)
+		return nil
+	}
+}
+
+// snapshot copies the slice — not the sessions — for a command that will read
+// it on another goroutine. `o` and `p` sort m.all in place, which swaps
+// elements of the very array the command is ranging over. The sessions
+// themselves are never mutated after a scan hands them over, so copying the
+// header is enough.
+func snapshot(ss []*session.Session) []*session.Session {
+	out := make([]*session.Session, len(ss))
+	copy(out, ss)
+	return out
 }
 
 // summariseAll queues every visible session that has no summary yet. The global
@@ -449,7 +510,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		return m, tea.Batch(m.scan, m.capture(), tick())
+		return m, tea.Batch(m.scanCmd(), m.capture(), tick())
 
 	case searchMsg:
 		m.query, m.matches = msg.query, msg.matches
@@ -474,7 +535,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanMsg:
 		wasIdle := !m.anyWorking()
+		m.scanning = false
 		m.all = msg
+		// Order it here rather than in the scan, so a sort or grouping chosen
+		// while the scan was in flight survives its arrival instead of being
+		// silently reverted until the next tick.
+		session.SortSessionsBy(m.all, m.sort)
 		m.notify.Update(m.all)
 		m.rebuild()
 		for _, s := range m.all {
@@ -485,13 +551,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.summaries[s.ID] = rec
 			}
 		}
+		var cmds []tea.Cmd
+		if cmd := m.pruneCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if m.rescan {
+			m.rescan = false
+			cmds = append(cmds, m.scanCmd())
+		}
 		if sel := m.sel(); sel != nil && m.shouldAutoSummarise(sel) {
-			return m, m.summarise(sel)
+			cmds = append(cmds, m.summarise(sel))
 		}
 		if wasIdle && m.anyWorking() {
-			return m, m.spin.Tick // restart the animation loop
+			cmds = append(cmds, m.spin.Tick) // restart the animation loop
 		}
-		return m, nil
+		return m, tea.Batch(cmds...)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -509,7 +583,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusMsg:
 		m.say(string(msg))
-		return m, m.scan
+		return m, m.refreshCmd()
 
 	case readyMsg:
 		return m, m.attach(msg.name, msg.cwd, msg.mode)
@@ -535,7 +609,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.rebuild()
 						return m, nil
 					}
-					all := m.all
+					all := snapshot(m.all)
 					m.say("searching transcripts for " + strconv.Quote(q) + "…")
 					return m, func() tea.Msg {
 						return searchMsg{query: q, matches: search.Transcripts(all, q)}
@@ -630,7 +704,7 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		m.say("refreshing")
-		return m, tea.Batch(m.scan, m.capture())
+		return m, tea.Batch(m.refreshCmd(), m.capture())
 	case "enter":
 		return m, m.open(m.mode)
 	case "t":

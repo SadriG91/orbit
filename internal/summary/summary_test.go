@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/session"
@@ -94,4 +95,91 @@ func pad2(i int) string {
 func mustTime(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339, s)
 	return t
+}
+
+// Prune existed, was correct, and had no callers and no test — so the cache
+// grew a file per session forever, including sessions whose transcripts were
+// deleted months ago.
+func TestPruneDropsOrphansAndKeepsLiveSessions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	live := &session.Session{Agent: session.Claude, ID: "still-here", Msgs: 4}
+	moved := &session.Session{Agent: session.Codex, ID: "continued", Msgs: 9}
+	gone := &session.Session{Agent: session.Claude, ID: "deleted", Msgs: 2}
+	for _, s := range []*session.Session{live, moved, gone} {
+		save(s, Record{Text: "summary of " + s.ID, CoveredMsgs: s.Msgs})
+	}
+
+	// The session moved on since its summary was written; it is stale, not gone,
+	// and its text is the basis of the next incremental update.
+	grown := &session.Session{Agent: session.Codex, ID: "continued", Msgs: 40}
+
+	Prune([]*session.Session{live, grown})
+
+	if _, ok := Load(live); !ok {
+		t.Error("dropped the summary of a session that still exists")
+	}
+	if _, ok := Load(grown); !ok {
+		t.Error("dropped a stale summary; the next update needs it")
+	}
+	if _, ok := Load(gone); ok {
+		t.Error("kept the summary of a session that no longer exists")
+	}
+}
+
+// A budget smaller than the transcript cuts head and tail out of the middle;
+// both seams have to land on rune boundaries.
+func TestExcerptHalvingCutsOnRuneBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	var lines []string
+	for i := 0; i < 60; i++ {
+		lines = append(lines, `{"type":"user","timestamp":"2026-07-30T09:00:00.000Z","cwd":"`+dir+
+			`","message":{"role":"user","content":"`+strings.Repeat("日éxxx", 12)+`"}}`)
+	}
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	s := &session.Session{Agent: session.Claude, ID: "s", Path: path, Cwd: dir, Msgs: 60}
+
+	for _, budget := range []int{201, 507, 1001, 2003} {
+		out, err := transcriptExcerpt(s, budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !utf8.ValidString(out) {
+			t.Errorf("budget %d produced invalid UTF-8", budget)
+		}
+	}
+}
+
+// Each store is read independently and fails quietly — no sqlite3 on PATH and
+// every Copilot session is simply absent from the list. Pruning on that
+// evidence would delete every Copilot summary, each one a paid CLI invocation.
+// An agent that contributed nothing is unknown, not empty.
+func TestPruneLeavesAgentsThatReportedNothingAlone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	claude := &session.Session{Agent: session.Claude, ID: "kept", Msgs: 3}
+	claudeGone := &session.Session{Agent: session.Claude, ID: "deleted", Msgs: 3}
+	copilot := &session.Session{Agent: session.Copilot, ID: "unreadable-store", Msgs: 5}
+	codex := &session.Session{Agent: session.Codex, ID: "also-unreadable", Msgs: 5}
+	for _, s := range []*session.Session{claude, claudeGone, copilot, codex} {
+		save(s, Record{Text: "summary of " + s.ID, CoveredMsgs: s.Msgs})
+	}
+
+	// A scan in which sqlite3 was missing and ~/.codex unreadable: only Claude
+	// sessions came back.
+	Prune([]*session.Session{claude})
+
+	if _, ok := Load(claude); !ok {
+		t.Error("dropped a live session's summary")
+	}
+	if _, ok := Load(claudeGone); ok {
+		t.Error("kept an orphan belonging to an agent that did report in")
+	}
+	if _, ok := Load(copilot); !ok {
+		t.Error("deleted a Copilot summary on the strength of a store that failed to open")
+	}
+	if _, ok := Load(codex); !ok {
+		t.Error("deleted a Codex summary on the strength of a store that failed to open")
+	}
 }
