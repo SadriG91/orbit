@@ -380,9 +380,15 @@ func (m *model) detail(w, h int) []string {
 	}
 	add(line, "")
 
-	if sum, ok := m.summaries[s.ID]; ok {
-		add(paneLabel.Render("▸ summary"))
-		for _, l := range wrap(clean(sum), w-2) {
+	if rec, ok := m.summaries[s.ID]; ok {
+		head := paneLabel.Render("▸ summary")
+		// Say plainly when the summary predates the latest turns, rather than
+		// presenting stale text as current.
+		if behind := rec.Behind(s); behind > 0 {
+			head += sDim.Render("  ") + sHit.Render(itoa(behind)+" msgs newer — s to update")
+		}
+		add(head)
+		for _, l := range wrap(clean(rec.Summary), w-2) {
 			add("  " + sName.Render(l))
 		}
 		add("")

@@ -79,9 +79,24 @@ so `f` searches the transcript bodies themselves and shows the matching text in
 the detail pane. Nothing is held in memory; the files are scanned on demand,
 which across ~80 sessions takes under 200ms.
 
-`s` summarises a session in two or three sentences and caches the result. The
-cache key includes the session's last event, so a summary is computed once per
-conversation state and quietly regenerates if you continue the session.
+`s` summarises a session in two or three sentences and caches the result.
+
+A summary records how much of the conversation it covers. When you continue a
+session it goes **stale rather than invalid**: the detail pane says how many
+messages it hasn't seen, and the next regeneration sends the existing summary
+plus only the new messages. Input stays roughly constant no matter how long a
+conversation runs, instead of re-reading the whole transcript every turn — which
+on an active session would bill a full summarisation per prompt.
+
+Rolling summaries compound their own omissions, so after five incremental
+updates the next one rebuilds from the transcript. An update is also skipped in
+favour of a rebuild when the unseen part is most of the conversation, where
+building on the old text buys nothing.
+
+Automatic regeneration (`auto = true`) is the only thing that spends money
+without being asked, so it is guarded: it waits until a session is
+`auto_min_new_messages` behind (default 8) and never fires while a turn is in
+flight, since the transcript is still being written.
 
 Summaries run through each provider's **own CLI** in non-interactive mode
 (`claude -p`, `codex exec`, `copilot -p`), so the work is billed to that agent's

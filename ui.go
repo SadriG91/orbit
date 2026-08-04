@@ -68,7 +68,8 @@ type (
 		matches map[string]Match
 	}
 	summaryMsg struct {
-		id, text, err string
+		id, err string
+		rec     SummaryRecord
 	}
 	// sendLogosMsg fires once the alt screen exists — see logosCmd.
 	sendLogosMsg struct{}
@@ -105,10 +106,10 @@ type model struct {
 	group       bool
 
 	searching bool
-	query     string               // the committed full-text query
-	matches   map[string]Match     // session id -> where it matched
-	summaries map[string]string    // session id -> cached or generated summary
-	pending   map[string]time.Time // summaries in flight -> when they started
+	query     string                   // the committed full-text query
+	matches   map[string]Match         // session id -> where it matched
+	summaries map[string]SummaryRecord // session id -> cached or generated summary
+	pending   map[string]time.Time     // summaries in flight -> when they started
 	prog      progress.Model
 	queue     []string      // session ids waiting to be summarised
 	summaryE  time.Duration // rolling estimate, shown as elapsed context only
@@ -125,7 +126,7 @@ func newModel(cfg Config, mode attachMode) *model {
 	return &model{
 		ix: NewIndex(), filter: ti, spin: sp, mode: mode,
 		cfg: cfg, icons: cfg.iconMode(), sort: cfg.sortMode(), group: cfg.Group,
-		summaries: map[string]string{}, pending: map[string]time.Time{},
+		summaries: map[string]SummaryRecord{}, pending: map[string]time.Time{},
 		prog:     progress.New(progress.WithColors(lipgloss.Color("#1f8a54"), lipgloss.Color("#00ff87")), progress.WithoutPercentage()),
 		summaryE: 12 * time.Second, // seeded from observation; adapts as it runs
 	}
@@ -262,6 +263,31 @@ func (m *model) rebuild() {
 // agent process; more in parallel makes every one of them slower.
 const maxSummaryJobs = 2
 
+// shouldAutoSummarise decides whether to spend money without being asked.
+//
+// A summary goes stale the moment a session gains a message, but regenerating
+// then would bill a request per prompt on an active session. So automatic
+// updates wait for a session to fall far enough behind, and never fire while a
+// turn is in flight — the transcript is still being written, and whatever it
+// says right now is about to change.
+func (m *model) shouldAutoSummarise(s *Session) bool {
+	if !m.cfg.Summary.Enabled || !m.cfg.Summary.Auto {
+		return false
+	}
+	if s.State == Working || s.State == NeedsApproval {
+		return false
+	}
+	rec, have := m.summaries[s.ID]
+	if !have {
+		return true // never summarised; the first one is the point of auto
+	}
+	minNew := m.cfg.Summary.AutoMinNew
+	if minNew <= 0 {
+		minNew = 8
+	}
+	return rec.Behind(s) >= minNew
+}
+
 // summariseAll queues every visible session that has no summary yet. The global
 // progress bar then advances as each finishes.
 func (m *model) summariseAll() tea.Cmd {
@@ -270,7 +296,7 @@ func (m *model) summariseAll() tea.Cmd {
 	}
 	n := 0
 	for _, s := range m.view {
-		if _, have := m.summaries[s.ID]; have {
+		if rec, have := m.summaries[s.ID]; have && !rec.Stale(s) {
 			continue
 		}
 		if _, running := m.pending[s.ID]; running {
@@ -330,8 +356,8 @@ func (m *model) summarise(s *Session) tea.Cmd {
 	if !m.cfg.Summary.Enabled {
 		return func() tea.Msg { return statusMsg("summaries are disabled in config") }
 	}
-	if _, have := m.summaries[s.ID]; have {
-		return nil
+	if rec, have := m.summaries[s.ID]; have && !rec.Stale(s) {
+		return nil // already current
 	}
 	if _, running := m.pending[s.ID]; running {
 		return nil
@@ -340,14 +366,14 @@ func (m *model) summarise(s *Session) tea.Cmd {
 	m.say("summarising with " + s.Agent.String() + "…")
 	cfg, sess := m.cfg.Summary, s
 	gen := func() tea.Msg {
-		text, err := GenerateSummary(sess, cfg)
-		out := summaryMsg{id: sess.ID, text: text}
+		rec, err := GenerateSummary(sess, cfg)
+		out := summaryMsg{id: sess.ID, rec: rec}
 		if err != nil {
 			out.err = err.Error()
 		}
 		return out
 	}
-	return tea.Batch(gen, m.spin.Tick) // make sure the bar animates
+	return tea.Batch(gen, m.spin.Tick) // make sure the spinner animates
 }
 
 // summaryElapsed reports how long a specific job has been running, for the
@@ -366,7 +392,7 @@ func (m *model) summaryElapsed(id string) (time.Duration, bool) {
 func (m *model) summaryCoverage() (done, total, inflight int) {
 	for _, s := range m.view {
 		total++
-		if _, have := m.summaries[s.ID]; have {
+		if rec, have := m.summaries[s.ID]; have && !rec.Stale(s) {
 			done++
 		}
 	}
@@ -430,7 +456,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.say("summary failed: " + msg.err)
 			return m, m.pump()
 		}
-		m.summaries[msg.id] = msg.text
+		m.summaries[msg.id] = msg.rec
 		return m, m.pump()
 
 	case scanMsg:
@@ -442,16 +468,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if _, have := m.summaries[s.ID]; have {
 				continue
 			}
-			if text, ok := CachedSummary(s); ok {
-				m.summaries[s.ID] = text
+			if rec, ok := LoadSummary(s); ok {
+				m.summaries[s.ID] = rec
 			}
 		}
-		if m.cfg.Summary.Auto {
-			if sel := m.sel(); sel != nil {
-				if _, have := m.summaries[sel.ID]; !have {
-					return m, m.summarise(sel)
-				}
-			}
+		if sel := m.sel(); sel != nil && m.shouldAutoSummarise(sel) {
+			return m, m.summarise(sel)
 		}
 		if wasIdle && m.anyWorking() {
 			return m, m.spin.Tick // restart the animation loop

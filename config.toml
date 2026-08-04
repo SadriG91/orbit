@@ -33,6 +33,12 @@ enabled = true
 # Off by default: it spends tokens as you browse.
 auto = false
 
+# Guards on automatic regeneration. A summary goes stale as soon as the session
+# gains a message, but regenerating on every turn would bill you per prompt —
+# so `auto` waits until a session is this far behind, and never interrupts a
+# session that is mid-turn. Manual `s` ignores both and updates immediately.
+auto_min_new_messages = 8
+
 # Cap on the summary text itself.
 max_chars = 420
 

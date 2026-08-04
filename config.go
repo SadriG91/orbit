@@ -30,6 +30,7 @@ type Summary struct {
 	Auto          bool     `toml:"auto"`
 	MaxChars      int      `toml:"max_chars"`
 	MaxInputChars int      `toml:"max_input_chars"`
+	AutoMinNew    int      `toml:"auto_min_new_messages"`
 	Claude        Provider `toml:"claude"`
 	Codex         Provider `toml:"codex"`
 	Copilot       Provider `toml:"copilot"`
@@ -38,6 +39,7 @@ type Summary struct {
 type Provider struct {
 	Command       []string `toml:"command"`
 	MaxInputChars int      `toml:"max_input_chars"`
+	AutoMinNew    int      `toml:"auto_min_new_messages"`
 }
 
 func (s Summary) provider(a Agent) Provider {

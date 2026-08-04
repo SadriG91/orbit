@@ -111,19 +111,128 @@ func TestSearchFindsBodyTextNotJustTitles(t *testing.T) {
 	}
 }
 
-func TestSummaryCacheKeyTracksSessionState(t *testing.T) {
-	base := &Session{Agent: Claude, ID: "abc", Modified: time.Unix(1000, 0)}
-	moved := &Session{Agent: Claude, ID: "abc", Modified: time.Unix(2000, 0)}
-	if summaryFile(base) == summaryFile(moved) {
-		t.Error("a continued session must not reuse the old summary")
+// The cache is keyed by session, not session state: a continued conversation
+// must keep its summary so the next update can build on it instead of paying to
+// re-read the whole transcript.
+func TestSummaryCacheSurvivesNewMessages(t *testing.T) {
+	base := &Session{Agent: Claude, ID: "abc", Msgs: 10, Modified: time.Unix(1000, 0)}
+	grown := &Session{Agent: Claude, ID: "abc", Msgs: 14, Modified: time.Unix(2000, 0)}
+	if summaryFile(base) != summaryFile(grown) {
+		t.Error("a new message must not orphan the cached summary")
 	}
-	same := &Session{Agent: Claude, ID: "abc", Modified: time.Unix(1000, 0)}
-	if summaryFile(base) != summaryFile(same) {
-		t.Error("unchanged session should hit the cache")
-	}
-	if summaryFile(base) == summaryFile(&Session{Agent: Codex, ID: "abc", Modified: time.Unix(1000, 0)}) {
+	if summaryFile(base) == summaryFile(&Session{Agent: Codex, ID: "abc"}) {
 		t.Error("different agents must not share a cache entry")
 	}
+
+	rec := SummaryRecord{Summary: "x", CoveredMsgs: 10}
+	if rec.Stale(base) {
+		t.Error("a summary covering every message is not stale")
+	}
+	if !rec.Stale(grown) || rec.Behind(grown) != 4 {
+		t.Errorf("expected stale and 4 behind, got stale=%v behind=%d", rec.Stale(grown), rec.Behind(grown))
+	}
+}
+
+// Automatic regeneration is the only path that spends money unprompted, so its
+// guards matter more than the feature.
+func TestAutoSummariseGuardsSpending(t *testing.T) {
+	cfg, _ := LoadConfigDefaults()
+	cfg.Summary.Auto = true
+	cfg.Summary.AutoMinNew = 8
+	m := newModel(cfg, attachInline)
+
+	s := &Session{Agent: Claude, ID: "a", Msgs: 20, Modified: time.Now()}
+	if !m.shouldAutoSummarise(s) {
+		t.Error("a session with no summary at all should be summarised")
+	}
+
+	m.summaries["a"] = SummaryRecord{Summary: "x", CoveredMsgs: 20}
+	if m.shouldAutoSummarise(s) {
+		t.Error("a current summary must not be regenerated")
+	}
+
+	s.Msgs = 23 // three new turns
+	if m.shouldAutoSummarise(s) {
+		t.Error("regenerating after a few turns would bill per prompt")
+	}
+	s.Msgs = 28 // past the threshold
+	if !m.shouldAutoSummarise(s) {
+		t.Error("should refresh once far enough behind")
+	}
+
+	// Never mid-turn: the transcript is still being written.
+	s.Tmux, s.State = &Tmux{AgentRunning: true}, Working
+	if m.shouldAutoSummarise(s) {
+		t.Error("must not summarise a session that is mid-turn")
+	}
+	s.State = NeedsApproval
+	if m.shouldAutoSummarise(s) {
+		t.Error("must not summarise a session sitting on a prompt")
+	}
+
+	// And not at all unless asked for.
+	off, _ := LoadConfigDefaults()
+	if newModel(off, attachInline).shouldAutoSummarise(&Session{Agent: Claude, ID: "b"}) {
+		t.Error("auto is off by default and must stay off")
+	}
+}
+
+// An incremental update must be preferred when a session merely continued, and
+// abandoned when the new part is most of the conversation.
+func TestBuildPromptChoosesIncrementalUpdate(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir) // redirect the summary cache
+	path := filepath.Join(dir, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl")
+	var lines []string
+	for i := 0; i < 30; i++ {
+		lines = append(lines, `{"type":"user","timestamp":"2026-07-30T09:`+
+			pad2(i)+`:00.000Z","cwd":"`+dir+`","message":{"role":"user","content":"message `+itoa(i)+`"}}`)
+	}
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+	s := parseClaude(path, time.Now())
+	if s == nil {
+		t.Fatal("did not parse")
+	}
+	s.Agent = Claude
+
+	// No prior summary: full rebuild.
+	if p, gen, err := buildPrompt(s, 12000); err != nil || gen != 0 || !strings.Contains(p, "TRANSCRIPT EXCERPT") {
+		t.Fatalf("expected a full prompt, got gen=%d err=%v", gen, err)
+	}
+
+	// A summary covering most of it, a few messages behind: incremental.
+	covered, _ := time.Parse(time.RFC3339, "2026-07-30T09:25:00.000Z")
+	saveSummary(s, SummaryRecord{Summary: "prior text", CoveredUntil: covered, CoveredMsgs: s.Msgs - 3})
+	p, gen, err := buildPrompt(s, 12000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen != 1 || !strings.Contains(p, "EXISTING SUMMARY") || !strings.Contains(p, "prior text") {
+		t.Errorf("expected an incremental update, got gen=%d", gen)
+	}
+	if strings.Contains(p, "message 0") {
+		t.Error("incremental prompt must not resend messages the summary already covers")
+	}
+
+	// Too many increments in a row: rebuild to stop the summary drifting.
+	saveSummary(s, SummaryRecord{Summary: "prior", CoveredUntil: covered,
+		CoveredMsgs: s.Msgs - 3, Generation: maxIncrements})
+	if _, gen, _ := buildPrompt(s, 12000); gen != 0 {
+		t.Errorf("expected a rebuild after %d increments, got gen=%d", maxIncrements, gen)
+	}
+
+	// Barely covered: updating from the old summary buys nothing.
+	saveSummary(s, SummaryRecord{Summary: "prior", CoveredUntil: covered, CoveredMsgs: 2})
+	if _, gen, _ := buildPrompt(s, 12000); gen != 0 {
+		t.Errorf("expected a rebuild when the summary covers almost nothing, got gen=%d", gen)
+	}
+}
+
+func pad2(i int) string {
+	if i < 10 {
+		return "0" + itoa(i)
+	}
+	return itoa(i)
 }
 
 // The global bar measures work completed, not time passed: it advances only
@@ -149,7 +258,7 @@ func TestSummaryCoverageAdvancesOnCompletion(t *testing.T) {
 		t.Errorf("a started job moved the bar: done=%d inflight=%d", d, f)
 	}
 	delete(m.pending, "a")
-	m.summaries["a"] = "done"
+	m.summaries["a"] = SummaryRecord{Summary: "done", CoveredMsgs: 99}
 	if d, _, _ := m.summaryCoverage(); d != 1 {
 		t.Errorf("a completed job did not move the bar: done=%d", d)
 	}
