@@ -47,12 +47,45 @@ func Delay(key string, def time.Duration) time.Duration {
 	return def
 }
 
+// Args prefixes the flags every tmux invocation needs, so there is one place
+// that decides how orbit talks to tmux.
+//
+// -u forces UTF-8 output. Without it tmux picks from the locale of whoever
+// asked, and a client it doesn't consider UTF-8 gets multi-byte characters
+// replaced with "_" on the way out. That mangles the "·" in a tab title, and
+// worse: the title orbit writes never compares equal to the title it reads
+// back, so every tick re-titles every session, forever.
+func Args(rest ...string) []string {
+	return append([]string{"-u", "-L", Socket, "-f", ConfPath()}, rest...)
+}
+
 func command(args ...string) *exec.Cmd {
-	return exec.Command("tmux", append([]string{"-L", Socket, "-f", ConfPath()}, args...)...)
+	return exec.Command("tmux", Args(args...)...)
 }
 
 const listFmt = "#{session_name}\x1f#{@orbit_session}\x1f#{@orbit_agent}\x1f#{session_attached}\x1f" +
 	"#{session_activity}\x1f#{pane_current_command}\x1f#{@orbit_title}\x1f#{session_path}\x1f#{session_created}"
+
+// Field separator, and the number of fields listFmt asks for.
+const (
+	fieldSep   = "\x1f"
+	listFields = 9
+)
+
+// Not every tmux hands the separator back the way it was sent. 3.4 — what
+// Debian and Ubuntu 24.04 ship — escapes control characters in command output,
+// so \x1f arrives as the literal four characters \037 and the whole line parses
+// as one field. That failure is silent and total: List returns nothing, every
+// session resolves to Dormant, and the dashboard shows a wall of `·` with no
+// error anywhere. Accept both forms rather than trusting one.
+const fieldSepEscaped = `\037`
+
+func splitFields(line string) []string {
+	if f := strings.Split(line, fieldSep); len(f) >= listFields {
+		return f
+	}
+	return strings.Split(line, fieldSepEscaped)
+}
 
 var shells = map[string]bool{
 	"zsh": true, "-zsh": true, "bash": true, "-bash": true, "sh": true,
@@ -66,27 +99,37 @@ func List() []*Session {
 	if err != nil {
 		return nil // no server running yet is the normal case
 	}
+	return parseList(string(out))
+}
+
+func parseList(out string) []*Session {
 	var res []*Session
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.Split(line, "\x1f")
-		if len(f) < 9 {
-			continue
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if s, ok := parseListLine(line); ok {
+			res = append(res, s)
 		}
-		act, _ := strconv.ParseInt(f[4], 10, 64)
-		created, _ := strconv.ParseInt(f[8], 10, 64)
-		res = append(res, &Session{
-			Name:         f[0],
-			SessionID:    f[1],
-			Agent:        f[2],
-			Attached:     f[3] == "1",
-			Activity:     time.Unix(act, 0),
-			Created:      time.Unix(created, 0),
-			AgentRunning: !shells[f[5]],
-			Title:        f[6],
-			Cwd:          f[7],
-		})
 	}
 	return res
+}
+
+func parseListLine(line string) (*Session, bool) {
+	f := splitFields(line)
+	if len(f) < listFields {
+		return nil, false
+	}
+	act, _ := strconv.ParseInt(f[4], 10, 64)
+	created, _ := strconv.ParseInt(f[8], 10, 64)
+	return &Session{
+		Name:         f[0],
+		SessionID:    f[1],
+		Agent:        f[2],
+		Attached:     f[3] == "1",
+		Activity:     time.Unix(act, 0),
+		Created:      time.Unix(created, 0),
+		AgentRunning: !shells[f[5]],
+		Title:        f[6],
+		Cwd:          f[7],
+	}, true
 }
 
 // Spawn creates a detached session and types cmd into it.
@@ -150,7 +193,7 @@ func Retitle(name, title string) {
 // (+new-window is Linux-only), so this is the only route that doesn't spawn a
 // detached window. Needs Accessibility permission for the terminal.
 func OpenTab(name string) error {
-	attach := "tmux -L " + Socket + " -f " + ConfPath() + " attach -t " + name
+	attach := "tmux " + strings.Join(Args("attach", "-t", name), " ")
 	wait := Delay("ORBIT_TAB_DELAY", time.Second).Seconds()
 	script := fmt.Sprintf(`
 tell application "Ghostty" to activate
@@ -167,12 +210,12 @@ end tell`, wait, applescriptString(attach))
 // OpenWindow spawns a detached Ghostty window running the session.
 func OpenWindow(name, cwd string) error {
 	if runtime.GOOS == "darwin" {
-		return exec.Command("open", "-na", "Ghostty.app", "--args",
-			"--working-directory="+cwd, "-e", "tmux", "-L", Socket, "-f", ConfPath(),
-			"attach", "-t", name).Run()
+		args := append([]string{"-na", "Ghostty.app", "--args", "--working-directory=" + cwd, "-e", "tmux"},
+			Args("attach", "-t", name)...)
+		return exec.Command("open", args...).Run()
 	}
-	return exec.Command("ghostty", "--working-directory="+cwd,
-		"-e", "tmux", "-L", Socket, "-f", ConfPath(), "attach", "-t", name).Start()
+	args := append([]string{"--working-directory=" + cwd, "-e", "tmux"}, Args("attach", "-t", name)...)
+	return exec.Command("ghostty", args...).Start()
 }
 
 func applescriptString(s string) string {

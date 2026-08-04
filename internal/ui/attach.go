@@ -76,7 +76,7 @@ func (m attachMode) resolve() attachMode {
 
 // attachCommand is the command that puts you inside a session.
 func attachCommand(name string) *exec.Cmd {
-	return exec.Command("tmux", "-L", tmux.Socket, "-f", tmux.ConfPath(), "attach", "-t", name)
+	return exec.Command("tmux", tmux.Args("attach", "-t", name)...)
 }
 
 // resumeSession and newSession compose an agent with tmux. They live here
