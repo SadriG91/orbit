@@ -65,14 +65,6 @@ func main() {
 	}
 
 	m := newModel(mode)
-	if m.icons == IconLogo {
-		// Upload once, before the alt screen: images live on the terminal side
-		// keyed by id, so every later frame just references them.
-		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
-			TransmitLogos(tty)
-			tty.Close()
-		}
-	}
 	m.notify = NewNotifier(!*noNotify)
 	defer m.notify.Close()
 

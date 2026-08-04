@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"time"
 
@@ -60,6 +61,8 @@ type (
 	scanMsg    []*Session
 	previewMsg struct{ name, text string }
 	statusMsg  string
+	// sendLogosMsg fires once the alt screen exists — see logosCmd.
+	sendLogosMsg struct{}
 	// readyMsg says a tmux session now exists and is waiting to be attached.
 	readyMsg struct {
 		name, cwd string
@@ -87,6 +90,7 @@ type model struct {
 	statusUntil time.Time
 	mode        attachMode
 	icons       IconMode
+	logosSent   bool
 	notify      *Notifier
 }
 
@@ -102,6 +106,12 @@ func newModel(mode attachMode) *model {
 
 func (m *model) Init() tea.Cmd {
 	return tea.Batch(m.scan, tick(), m.spin.Tick)
+}
+
+// logosCmd waits for the first frame to have been painted — and with it the
+// alt screen switch — before uploading the marks.
+func logosCmd() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg { return sendLogosMsg{} })
 }
 
 func tick() tea.Cmd {
@@ -234,6 +244,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
+		if m.icons == IconLogo && !m.logosSent {
+			m.logosSent = true
+			return m, logosCmd()
+		}
+		return m, nil
+
+	case sendLogosMsg:
+		// Kitty virtual placements belong to the screen they were created on.
+		// Sending these before Bubble Tea switches to the alt screen puts them
+		// on the primary one, where the dashboard never draws — the images then
+		// exist but every placeholder cell resolves to nothing and renders
+		// blank. Hence: transmit only once the alt screen is already up.
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			TransmitLogos(tty)
+			tty.Close()
+		}
 		return m, nil
 
 	case tickMsg:
