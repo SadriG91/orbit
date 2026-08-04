@@ -31,8 +31,9 @@ func (ix *Index) scanCodex() []*Session {
 }
 
 type codexRecord struct {
-	Type    string `json:"type"`
-	Payload struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	Payload   struct {
 		Type      string `json:"type"`
 		SessionID string `json:"session_id"`
 		ID        string `json:"id"` // older rollouts only carry `id`
@@ -52,6 +53,7 @@ func parseCodex(path string, mod time.Time) *Session {
 	defer f.Close()
 
 	s := &Session{Path: path, Modified: mod}
+	var lastStamp string
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 256*1024), 64*1024*1024)
@@ -63,6 +65,9 @@ func parseCodex(path string, mod time.Time) *Session {
 		var r codexRecord
 		if json.Unmarshal(line, &r) != nil {
 			continue
+		}
+		if r.Timestamp != "" {
+			lastStamp = r.Timestamp
 		}
 		switch r.Type {
 		case "session_meta":
@@ -108,5 +113,6 @@ func parseCodex(path string, mod time.Time) *Session {
 	}
 	// Title from the first prompt, last prompt separately — keep them distinct.
 	s.Title = truncate(firstLine(s.Title), 60)
+	s.Modified = eventTime(lastStamp, mod)
 	return s
 }

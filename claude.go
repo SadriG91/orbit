@@ -41,6 +41,7 @@ func (ix *Index) scanClaude() []*Session {
 
 type claudeRecord struct {
 	Type        string `json:"type"`
+	Timestamp   string `json:"timestamp"`
 	AITitle     string `json:"aiTitle"`
 	LastPrompt  string `json:"lastPrompt"`
 	Cwd         string `json:"cwd"`
@@ -65,6 +66,7 @@ func parseClaude(path string, mod time.Time) *Session {
 		Path:     path,
 		Modified: mod,
 	}
+	var lastStamp string
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 256*1024), 64*1024*1024) // tool results get long
@@ -76,6 +78,9 @@ func parseClaude(path string, mod time.Time) *Session {
 		var r claudeRecord
 		if json.Unmarshal(line, &r) != nil {
 			continue
+		}
+		if r.Timestamp != "" {
+			lastStamp = r.Timestamp
 		}
 		if r.Cwd != "" {
 			s.Cwd = r.Cwd
@@ -113,6 +118,7 @@ func parseClaude(path string, mod time.Time) *Session {
 	if s.Cwd == "" {
 		return nil // can't resume somewhere we can't locate
 	}
+	s.Modified = eventTime(lastStamp, mod)
 	return s
 }
 

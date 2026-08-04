@@ -307,6 +307,22 @@ func (ix *Index) scanPaths(paths []string, ag Agent, parse func(string, time.Tim
 	return out
 }
 
+// eventTime prefers the timestamp the agent itself recorded over the file's
+// mtime. They diverge badly: agents rewrite old transcripts in batches (title
+// backfills and the like), which bumps mtime on sessions untouched for weeks
+// and makes a three-week-old conversation claim it ran an hour ago.
+func eventTime(stamp string, fallback time.Time) time.Time {
+	if stamp == "" {
+		return fallback
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, stamp); err == nil {
+			return t
+		}
+	}
+	return fallback
+}
+
 func home(rest ...string) string {
 	h, _ := os.UserHomeDir()
 	return filepath.Join(append([]string{h}, rest...)...)
