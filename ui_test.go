@@ -39,7 +39,7 @@ func TestViewRenders(t *testing.T) {
 	}
 
 	out := m.View()
-	for _, want := range []string{"orbit", "needs you", "your turn", "Refactor batch runner", "work/api-gateway", "attach"} {
+	for _, want := range []string{"╔═╗╦═╗╔╗", "needs you", "your turn", "Refactor batch runner", "work/api-gateway", "attach"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q", want)
 		}
@@ -50,6 +50,19 @@ func TestViewRenders(t *testing.T) {
 		}
 	}
 	t.Log("\n" + out)
+
+	// The full-size banner only appears on a tall, wide terminal.
+	m.w, m.h = 150, 44
+	big := m.View()
+	if !strings.Contains(big, "██████╗") {
+		t.Error("full banner missing at 150x44")
+	}
+	for i, line := range strings.Split(big, "\n") {
+		if n := len([]rune(stripANSI(line))); n > m.w {
+			t.Errorf("big layout line %d is %d cols, wider than %d", i, n, m.w)
+		}
+	}
+	t.Log("\n" + big)
 }
 
 func TestFilterAndDetail(t *testing.T) {

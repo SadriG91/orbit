@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -75,6 +76,7 @@ type model struct {
 	w, h   int
 
 	filter    textinput.Model
+	spin      spinner.Model
 	filtering bool
 	showAll   bool
 
@@ -92,11 +94,13 @@ func newModel(mode attachMode) *model {
 	ti.Prompt = "/"
 	ti.Placeholder = "filter"
 	ti.CharLimit = 60
-	return &model{ix: NewIndex(), filter: ti, mode: mode}
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	sp.Style = lipgloss.NewStyle().Foreground(cBright)
+	return &model{ix: NewIndex(), filter: ti, spin: sp, mode: mode}
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(tea.SetWindowTitle("orbit"), m.scan, tick())
+	return tea.Batch(tea.SetWindowTitle("orbit"), m.scan, tick(), m.spin.Tick)
 }
 
 func tick() tea.Cmd {
@@ -211,6 +215,15 @@ func (m *model) rebuild() {
 	}
 }
 
+func (m *model) anyWorking() bool {
+	for _, s := range m.all {
+		if s.State == Working {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *model) say(s string) {
 	m.status = s
 	m.statusUntil = time.Now().Add(6 * time.Second)
@@ -226,9 +239,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.scan, m.capture(), tick())
 
 	case scanMsg:
+		wasIdle := !m.anyWorking()
 		m.all = msg
 		m.notify.Update(m.all)
 		m.rebuild()
+		if wasIdle && m.anyWorking() {
+			return m, m.spin.Tick // restart the animation loop
+		}
+		return m, nil
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		// Only keep animating while something is actually working, so an idle
+		// dashboard costs nothing.
+		for _, s := range m.all {
+			if s.State == Working {
+				return m, cmd
+			}
+		}
 		return m, nil
 
 	case previewMsg:
@@ -407,227 +436,4 @@ func (m *model) kill() tea.Cmd {
 		}
 		return statusMsg("killed " + name)
 	}
-}
-
-func (m *model) View() string {
-	if m.w == 0 {
-		return "starting orbit…"
-	}
-	listW := min(64, max(34, m.w*46/100))
-	if m.w < 80 {
-		listW = m.w - 2
-	}
-	detW := m.w - listW - 3
-	bodyH := m.h - 4 // header, rule, footer, status
-
-	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n")
-	b.WriteString(sRule.Render(strings.Repeat("─", m.w)))
-	b.WriteString("\n")
-
-	left := m.list(listW, bodyH)
-	if detW < 24 {
-		b.WriteString(strings.Join(left, "\n"))
-	} else {
-		right := m.detail(detW, bodyH)
-		for i := 0; i < bodyH; i++ {
-			l, r := "", ""
-			if i < len(left) {
-				l = left[i]
-			}
-			if i < len(right) {
-				r = right[i]
-			}
-			b.WriteString(pad(l, listW) + sRule.Render(" │ ") + r + "\n")
-		}
-	}
-
-	b.WriteString(sRule.Render(strings.Repeat("─", m.w)))
-	b.WriteString("\n")
-	b.WriteString(m.footer())
-	return b.String()
-}
-
-func (m *model) header() string {
-	var working, needs, turn int
-	for _, s := range m.all {
-		switch s.State {
-		case Working:
-			working++
-		case NeedsApproval:
-			needs++
-		case YourTurn:
-			turn++
-		}
-	}
-	parts := []string{sDim.Render(itoa(len(m.view)) + " sessions")}
-	if working > 0 {
-		parts = append(parts, stateStyle(Working).Render(itoa(working)+" working"))
-	}
-	if turn > 0 {
-		parts = append(parts, stateStyle(YourTurn).Render(itoa(turn)+" your turn"))
-	}
-	if needs > 0 {
-		parts = append(parts, stateStyle(NeedsApproval).Render(itoa(needs)+" needs you"))
-	}
-	head := " " + sTitle.Render("orbit") + "  " + strings.Join(parts, sDim.Render(" · "))
-	if m.filtering || m.filter.Value() != "" {
-		head += "   " + m.filter.View()
-	}
-	return head
-}
-
-func (m *model) list(w, h int) []string {
-	rows := h / 2
-	if rows < 1 {
-		rows = 1
-	}
-	if m.cursor < m.top {
-		m.top = m.cursor
-	}
-	if m.cursor >= m.top+rows {
-		m.top = m.cursor - rows + 1
-	}
-	if m.top > max(0, len(m.view)-rows) {
-		m.top = max(0, len(m.view)-rows)
-	}
-
-	var out []string
-	if len(m.view) == 0 {
-		out = append(out, "", sDim.Render("  no sessions match — press a for all"))
-		return out
-	}
-	for i := m.top; i < len(m.view) && i < m.top+rows; i++ {
-		s := m.view[i]
-		sel := i == m.cursor
-
-		bar := "  "
-		if sel {
-			bar = sBar.Render("▌") + " "
-		}
-		t := relTime(s.Modified)
-		headW := w - 2 - len([]rune(t)) - 1
-		cwd := pad(truncate(s.ShortCwd(), headW-5), headW-5)
-		line1 := bar + stateStyle(s.State).Render(s.State.Icon()) + " " +
-			agentStyle(s.Agent).Render(s.Agent.Tag()) + " " +
-			sMid.Render(cwd) + " " + sDim.Render(t)
-
-		label := s.State.Label()
-		nameW := w - 4 - len([]rune(label))
-		if label != "" {
-			nameW--
-		}
-		ns := sName
-		if sel {
-			ns = sNameOn
-		}
-		line2 := bar + "  " + ns.Render(pad(truncate(clean(s.Name()), nameW), nameW))
-		if label != "" {
-			line2 += " " + stateStyle(s.State).Render(label)
-		}
-		out = append(out, line1, line2)
-	}
-	return out
-}
-
-func (m *model) detail(w, h int) []string {
-	s := m.sel()
-	if s == nil {
-		return nil
-	}
-	var out []string
-	add := func(ss ...string) { out = append(out, ss...) }
-
-	add(sNameOn.Render(truncate(clean(s.Name()), w)))
-	add(sDim.Render(truncate(s.Cwd, w)))
-
-	meta := []string{s.Agent.String()}
-	if s.Branch != "" {
-		meta = append(meta, s.Branch)
-	}
-	if s.Msgs > 0 {
-		meta = append(meta, itoa(s.Msgs)+" msgs")
-	}
-	meta = append(meta, relTime(s.Modified)+" ago")
-	line := sMid.Render(truncate(strings.Join(meta, " · "), w))
-	if lbl := s.State.Label(); lbl != "" {
-		line += "  " + stateStyle(s.State).Render(lbl)
-	}
-	add(line, "")
-
-	if s.Last != "" {
-		add(sHead.Render("last prompt"))
-		for _, l := range wrap(clean(s.Last), w-2) {
-			add("  " + sName.Render(l))
-		}
-		add("")
-	}
-
-	if s.Tmux != nil && m.previewName == s.Tmux.Name && m.preview != "" {
-		add(sHead.Render("live output"))
-		lines := strings.Split(m.preview, "\n")
-		// Trailing blank lines are just the unused bottom of the pane.
-		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-			lines = lines[:len(lines)-1]
-		}
-		room := h - len(out) - 1
-		if room > 0 && len(lines) > room {
-			lines = lines[len(lines)-room:]
-		}
-		for _, l := range lines {
-			add("  " + sMid.Render(truncate(clean(l), w-2)))
-		}
-	} else if s.Tmux == nil {
-		add(sDim.Render("not running — enter to resume it"))
-	}
-	return out
-}
-
-func (m *model) footer() string {
-	if m.status != "" && time.Now().Before(m.statusUntil) {
-		st := sHead
-		if strings.Contains(m.status, "failed") || strings.Contains(m.status, "not installed") {
-			st = sErr
-		}
-		return " " + st.Render(m.status)
-	}
-	keys := [][2]string{
-		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"1/2/3", "cl/cx/cp"},
-		{"x", "kill"}, {"/", "filter"}, {"a", "all"}, {"q", "quit"},
-	}
-	if canSpawnTab() {
-		keys = append(keys[:2], append([][2]string{{"w", "window"}}, keys[2:]...)...)
-	}
-	var ps []string
-	for _, k := range keys {
-		ps = append(ps, sBar.Render(k[0])+" "+sDim.Render(k[1]))
-	}
-	return " " + strings.Join(ps, sRule.Render(" · "))
-}
-
-func wrap(s string, w int) []string {
-	if w < 8 {
-		return []string{truncate(s, w)}
-	}
-	var out []string
-	line := ""
-	for _, word := range strings.Fields(s) {
-		switch {
-		case line == "":
-			line = word
-		case len([]rune(line))+1+len([]rune(word)) <= w:
-			line += " " + word
-		default:
-			out = append(out, line)
-			line = word
-		}
-		if len(out) == 4 {
-			return append(out[:4], truncate(line, w))
-		}
-	}
-	if line != "" {
-		out = append(out, truncate(line, w))
-	}
-	return out
 }

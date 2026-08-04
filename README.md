@@ -9,16 +9,25 @@ session is blocked on me right now?** Sessions run inside tmux, so closing a tab
 never kills work.
 
 ```
- orbit  77 sessions · 2 working · 1 needs you
-──────────────────────────────────────────────────────────────────────────
-▌ ▲ cl work/api-gateway               2m │ Refactor batch runner
-▌   Refactor batch runner      needs you │ ~/work/api-gateway
-  ◆ cx src/widgets                   40m │ codex · main · 12 msgs · 40m ago
-    Evaluate the docs of this repo  your turn │
-  · cp work/docs-site                 3d │ last prompt
-    Integrate Copilot in Actions        │   now run the tests
-──────────────────────────────────────────────────────────────────────────
- ⏎ attach · i here · n new · 1/2/3 cl/cx/cp · x kill · / filter · a all · q
+ ██████╗ ██████╗ ██████╗ ██╗████████╗
+██╔═══██╗██╔══██╗██╔══██╗██║╚══██╔══╝
+██║   ██║██████╔╝██████╔╝██║   ██║
+██║   ██║██╔══██╗██╔══██╗██║   ██║      ▲ 1 needs you   ◆ 1 your turn   ● 2 working
+╚██████╔╝██║  ██║██████╔╝██║   ██║     18 of 77 sessions · claude · codex · copilot
+ ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═╝   ╚═╝
+╭─ SESSIONS · RECENT ────────────────────────────╮ ╭─ LIVE · WORK/API-GATEWAY ──────────────────╮
+│ ▌ ▲ cl work/api-gateway                     2m │ │ Refactor batch runner                      │
+│ ▌   Refactor batch runner            needs you │ │ ~/work/api-gateway                         │
+│   ⠸ cx src/widgets                         40m │ │ claude · main · 46 msgs · 2m ago  ▲ needs you│
+│     Evaluate the docs of this repo     working │ │                                            │
+│   ◆ cl services/billing                     1h │ │ ▸ last prompt                              │
+│     Add retry to the webhook queue   your turn │ │   now run the tests                        │
+│   · cp work/docs-site                       3d │ │                                            │
+│     Integrate Copilot in Actions               │ │ ▸ live output                              │
+│                                                │ │   ● Bash(go test ./...)                    │
+│                                                │ │     Do you want to proceed?                │
+╰────────────────────────────────────────────────╯ ╰────────────────────────────────────────────╯
+  ⏎  attach   i  here   w  window   n  new   1/2/3  agent   x  kill   /  filter   a  all   q  quit
 ```
 
 ## Why
