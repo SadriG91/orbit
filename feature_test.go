@@ -126,27 +126,66 @@ func TestSummaryCacheKeyTracksSessionState(t *testing.T) {
 	}
 }
 
-// The provider CLIs report no progress, so the bar is elapsed-vs-estimate. It
-// must never reach full while still working — a bar sitting at 100% reads as a
-// hang — and the estimate must adapt rather than stay a hardcoded guess.
-func TestSummaryProgressStaysHonest(t *testing.T) {
+// The global bar measures work completed, not time passed: it advances only
+// when a summary finishes, so it can never imply progress that hasn't happened.
+func TestSummaryCoverageAdvancesOnCompletion(t *testing.T) {
 	m := newModel(testConfig(), attachInline)
-	m.pending["x"] = time.Now().Add(-2 * time.Second)
-	pct, elapsed, running := m.summaryProgress("x")
-	if !running || elapsed < time.Second {
-		t.Fatalf("expected a running job, got running=%v elapsed=%v", running, elapsed)
+	m.w, m.h = 120, 40
+	now := time.Now()
+	for _, id := range []string{"a", "b", "c", "d"} {
+		m.all = append(m.all, &Session{Agent: Claude, ID: id, Cwd: home("w", id),
+			Title: "Session " + id, Modified: now})
 	}
-	if pct <= 0 || pct >= 1 {
-		t.Errorf("progress %.2f out of range", pct)
+	m.rebuild()
+
+	done, total, inflight := m.summaryCoverage()
+	if done != 0 || total != 4 || inflight != 0 {
+		t.Fatalf("fresh state: got %d/%d, %d in flight", done, total, inflight)
 	}
 
-	// Far past the estimate it must still be short of full.
-	m.pending["x"] = time.Now().Add(-10 * time.Minute)
-	if pct, _, _ := m.summaryProgress("x"); pct > 0.95 {
-		t.Errorf("overrunning job showed %.2f, must cap below full", pct)
+	// Starting a job must NOT move the bar — only finishing one does.
+	m.pending["a"] = now
+	if d, _, f := m.summaryCoverage(); d != 0 || f != 1 {
+		t.Errorf("a started job moved the bar: done=%d inflight=%d", d, f)
 	}
-	if _, _, running := m.summaryProgress("nosuch"); running {
-		t.Error("reported progress for a job that isn't running")
+	delete(m.pending, "a")
+	m.summaries["a"] = "done"
+	if d, _, _ := m.summaryCoverage(); d != 1 {
+		t.Errorf("a completed job did not move the bar: done=%d", d)
+	}
+
+	// Queued work counts as in flight so the label is honest.
+	m.queue = []string{"b", "c"}
+	if _, _, f := m.summaryCoverage(); f != 2 {
+		t.Errorf("queued jobs not counted: %d", f)
+	}
+	if bar := m.coverageBar(); !strings.Contains(stripANSI(bar), "1/4 summarised") {
+		t.Errorf("bar label wrong: %q", stripANSI(bar))
+	}
+}
+
+// Each job is a whole agent process, so they must not all start at once.
+func TestSummariseAllRespectsConcurrencyLimit(t *testing.T) {
+	m := newModel(testConfig(), attachInline)
+	m.w, m.h = 120, 40
+	for _, id := range []string{"a", "b", "c", "d", "e"} {
+		m.all = append(m.all, &Session{Agent: Claude, ID: id, Cwd: t.TempDir(),
+			Title: "Session " + id, Modified: time.Now()})
+	}
+	m.rebuild()
+	m.summariseAll()
+
+	if len(m.pending) > maxSummaryJobs {
+		t.Errorf("started %d jobs at once, limit is %d", len(m.pending), maxSummaryJobs)
+	}
+	if len(m.pending)+len(m.queue) != 5 {
+		t.Errorf("expected all 5 accounted for, got %d running + %d queued", len(m.pending), len(m.queue))
+	}
+	// Re-queuing must not duplicate work already in hand.
+	before := len(m.pending) + len(m.queue)
+	m.summariseAll()
+	if got := len(m.pending) + len(m.queue); got != before {
+		t.Errorf("re-queued duplicates: %d -> %d", before, got)
 	}
 }
 

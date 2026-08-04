@@ -56,6 +56,7 @@ optional but gets you tab spawning and desktop notifications.
 | `t`     | attach in a new Ghostty tab                                |
 | `w`     | attach in a new Ghostty window                             |
 | `s`     | summarise this session with a cheap model, then cache it   |
+| `S`     | queue every visible session that has no summary yet        |
 | `f`     | full-text search inside transcripts                        |
 | `o`     | cycle sort: age / tokens / project / agent                 |
 | `p`     | group the list under project headings                      |
@@ -93,11 +94,12 @@ summarising job rather than a reasoning one:
 command = ["claude", "-p", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
 ```
 
-Generation takes around ten seconds, so it runs in the background behind a
-progress bar. The providers report no progress of their own, so the bar is
-elapsed time against a rolling estimate that adapts to your machine and models,
-capped short of full — a bar sitting at 100% while still working reads as a
-hang. Ghostty also gets a native progress indicator on the tab.
+Generation takes around ten seconds and runs in the background. The bar in the
+header is global and measures *coverage* — how many of the sessions on screen
+have a summary — so it advances only when one finishes, never on time elapsed.
+`S` queues everything still missing one, two at a time, since each job is a
+whole agent process and running more in parallel just makes each slower.
+Ghostty also gets a native progress indicator on the tab while work is in hand.
 
 Because summarising deliberately uses cheap models, and cheap models have the
 smallest context windows, only a thin slice of the transcript is sent: the

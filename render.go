@@ -195,9 +195,7 @@ func (m *model) header() string {
 	if shell > 0 {
 		pills = append(pills, pill("○", itoa(shell)+" idle", cGreen))
 	}
-	if n := len(m.pending); n > 0 {
-		pills = append(pills, pill("◍", itoa(n)+" summarising", lipgloss.Color("101")))
-	}
+
 	if len(pills) == 0 {
 		pills = append(pills, lipgloss.NewStyle().Foreground(cDim).
 			Padding(0, 1).Render("nothing running"))
@@ -224,6 +222,7 @@ func (m *model) header() string {
 	art := banner(m.w, m.h)
 	stats := []string{
 		strings.Join(pills, " "),
+		m.coverageBar(),
 		tagline.Render(itoa(len(m.view))+" of "+itoa(len(m.all))+" shown") +
 			tagline.Render("  ·  ") + strings.Join(legend, tagline.Render(" · ")),
 	}
@@ -241,6 +240,21 @@ func (m *model) header() string {
 		head = lipgloss.NewStyle().MaxWidth(m.w).Render(head)
 	}
 	return head
+}
+
+// coverageBar is the global summary progress: filled by sessions that have a
+// summary, advancing only as one completes.
+func (m *model) coverageBar() string {
+	done, total, inflight := m.summaryCoverage()
+	if total == 0 || !m.cfg.Summary.Enabled {
+		return ""
+	}
+	m.prog.SetWidth(28)
+	label := itoa(done) + "/" + itoa(total) + " summarised"
+	if inflight > 0 {
+		label += sDim.Render("  ") + sTok.Render(m.spin.View()+" "+itoa(inflight)+" queued")
+	}
+	return m.prog.ViewAs(float64(done)/float64(total)) + "  " + tagline.Render(label)
 }
 
 func (m *model) list(w, h int) []string {
@@ -372,12 +386,10 @@ func (m *model) detail(w, h int) []string {
 			add("  " + sName.Render(l))
 		}
 		add("")
-	} else if pct, elapsed, running := m.summaryProgress(s.ID); running {
+	} else if elapsed, running := m.summaryElapsed(s.ID); running {
 		add(paneLabel.Render("▸ summary"))
-		m.prog.SetWidth(max(10, min(w-2, 44)))
-		add("  " + m.prog.ViewAs(pct))
 		add("  " + sDim.Render(m.spin.View()+" "+s.Agent.String()+" · "+
-			itoa(int(elapsed.Seconds()))+"s of ~"+itoa(int(m.summaryE.Seconds()))+"s"))
+			itoa(int(elapsed.Seconds()))+"s elapsed"))
 		add("")
 	} else if m.cfg.Summary.Enabled {
 		add(sDim.Render("press s to summarise this session"), "")
@@ -441,7 +453,7 @@ func (m *model) footer() string {
 		return " " + st.Render("▸ "+m.status)
 	}
 	keys := [][2]string{
-		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"s", "summary"},
+		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"s/S", "sum/all"},
 		{"f", "search"}, {"/", "filter"}, {"o", "sort"}, {"p", "group"},
 		{"x", "kill"}, {"a", "all"}, {"q", "quit"},
 	}

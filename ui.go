@@ -110,7 +110,8 @@ type model struct {
 	summaries map[string]string    // session id -> cached or generated summary
 	pending   map[string]time.Time // summaries in flight -> when they started
 	prog      progress.Model
-	summaryE  time.Duration // rolling estimate of how long a summary takes
+	queue     []string      // session ids waiting to be summarised
+	summaryE  time.Duration // rolling estimate, shown as elapsed context only
 	notify    *Notifier
 }
 
@@ -257,6 +258,72 @@ func (m *model) rebuild() {
 	}
 }
 
+// maxSummaryJobs bounds how many provider CLIs run at once. Each is a whole
+// agent process; more in parallel makes every one of them slower.
+const maxSummaryJobs = 2
+
+// summariseAll queues every visible session that has no summary yet. The global
+// progress bar then advances as each finishes.
+func (m *model) summariseAll() tea.Cmd {
+	if !m.cfg.Summary.Enabled {
+		return func() tea.Msg { return statusMsg("summaries are disabled in config") }
+	}
+	n := 0
+	for _, s := range m.view {
+		if _, have := m.summaries[s.ID]; have {
+			continue
+		}
+		if _, running := m.pending[s.ID]; running {
+			continue
+		}
+		if slicesContains(m.queue, s.ID) {
+			continue
+		}
+		m.queue = append(m.queue, s.ID)
+		n++
+	}
+	if n == 0 {
+		return func() tea.Msg { return statusMsg("every visible session is already summarised") }
+	}
+	m.say("queued " + itoa(n) + " sessions to summarise")
+	return m.pump()
+}
+
+func slicesContains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+// pump starts queued jobs up to the concurrency limit.
+func (m *model) pump() tea.Cmd {
+	var cmds []tea.Cmd
+	for len(m.pending) < maxSummaryJobs && len(m.queue) > 0 {
+		id := m.queue[0]
+		m.queue = m.queue[1:]
+		var target *Session
+		for _, s := range m.all {
+			if s.ID == id {
+				target = s
+				break
+			}
+		}
+		if target == nil {
+			continue
+		}
+		if cmd := m.summarise(target); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
 // summarise kicks off a provider CLI in the background. It takes seconds, so
 // the UI stays responsive and the result arrives as a message.
 func (m *model) summarise(s *Session) tea.Cmd {
@@ -283,17 +350,27 @@ func (m *model) summarise(s *Session) tea.Cmd {
 	return tea.Batch(gen, m.spin.Tick) // make sure the bar animates
 }
 
-// summaryProgress estimates how far along a generation is. The provider CLIs
-// report nothing, so this is elapsed time against a rolling estimate, capped
-// short of full — a bar that sits at 100% while still working reads as hung.
-func (m *model) summaryProgress(id string) (float64, time.Duration, bool) {
+// summaryElapsed reports how long a specific job has been running, for the
+// detail pane. It is not progress — the provider CLIs report none.
+func (m *model) summaryElapsed(id string) (time.Duration, bool) {
 	started, ok := m.pending[id]
 	if !ok {
-		return 0, 0, false
+		return 0, false
 	}
-	elapsed := time.Since(started)
-	pct := float64(elapsed) / float64(max(m.summaryE, time.Second))
-	return min(pct, 0.95), elapsed, true
+	return time.Since(started), true
+}
+
+// summaryCoverage is the global bar: how many of the sessions on screen have a
+// summary. It only moves when one finishes, so it measures work completed
+// rather than time passed.
+func (m *model) summaryCoverage() (done, total, inflight int) {
+	for _, s := range m.view {
+		total++
+		if _, have := m.summaries[s.ID]; have {
+			done++
+		}
+	}
+	return done, total, len(m.pending) + len(m.queue)
 }
 
 func (m *model) anyWorking() bool {
@@ -351,10 +428,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.pending, msg.id)
 		if msg.err != "" {
 			m.say("summary failed: " + msg.err)
-			return m, nil
+			return m, m.pump()
 		}
 		m.summaries[msg.id] = msg.text
-		return m, nil
+		return m, m.pump()
 
 	case scanMsg:
 		wasIdle := !m.anyWorking()
@@ -498,6 +575,8 @@ func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.summarise(sel)
 		}
 		return m, nil
+	case "S":
+		return m, m.summariseAll()
 	case "esc":
 		if m.query != "" {
 			m.query, m.matches = "", nil
