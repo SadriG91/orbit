@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # macOS is the primary target, and it's where tmux behaves the way the
+    # integration test expects.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: brew install tmux
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'd: $unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  build:
+    # Linux has no tab-spawning, but the in-place attach path works, so it needs
+    # to keep compiling.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: go build ./...
