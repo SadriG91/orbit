@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	_ "embed"
 	"fmt"
 	"os"
@@ -59,8 +60,32 @@ func Args(rest ...string) []string {
 	return append([]string{"-u", "-L", Socket, "-f", ConfPath()}, rest...)
 }
 
-func command(args ...string) *exec.Cmd {
-	return exec.Command("tmux", Args(args...)...)
+// Every tmux invocation is bounded. A wedged server would otherwise block
+// whichever scan called it for as long as it stayed wedged, and a scan has no
+// way to interrupt a syscall — which is how a dashboard silently stops
+// refreshing. run and output own the context so no cancel is left dangling.
+const commandTimeout = 10 * time.Second
+
+func withTimeout(fn func(*exec.Cmd) error, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	return fn(exec.CommandContext(ctx, "tmux", Args(args...)...))
+}
+
+// run executes a tmux command and discards its output.
+func run(args ...string) error {
+	return withTimeout(func(c *exec.Cmd) error { return c.Run() }, args...)
+}
+
+// output executes a tmux command and returns stdout.
+func output(args ...string) ([]byte, error) {
+	var out []byte
+	err := withTimeout(func(c *exec.Cmd) error {
+		var e error
+		out, e = c.Output()
+		return e
+	}, args...)
+	return out, err
 }
 
 const listFmt = "#{session_name}\x1f#{@orbit_session}\x1f#{@orbit_agent}\x1f#{session_attached}\x1f" +
@@ -95,7 +120,7 @@ var shells = map[string]bool{
 // List returns every live orbit session. Sessions started with `n` have no
 // @orbit_session until the agent writes a transcript and the model links them.
 func List() []*Session {
-	out, err := command("list-sessions", "-F", listFmt).Output()
+	out, err := output("list-sessions", "-F", listFmt)
 	if err != nil {
 		return nil // no server running yet is the normal case
 	}
@@ -140,16 +165,16 @@ func parseListLine(line string) (*Session, bool) {
 // stub — and those don't exist in the bare `sh -c` new-session would use. It
 // also leaves you at a usable prompt if the agent exits.
 func Spawn(name, cwd, cmd, title, agent, sessionID string) error {
-	if err := command("new-session", "-d", "-s", name, "-c", cwd, "-x", "220", "-y", "60").Run(); err != nil {
+	if err := run("new-session", "-d", "-s", name, "-c", cwd, "-x", "220", "-y", "60"); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
-	command("set-option", "-t", name, "@orbit_agent", agent).Run()
-	command("set-option", "-t", name, "@orbit_title", title).Run()
+	run("set-option", "-t", name, "@orbit_agent", agent)
+	run("set-option", "-t", name, "@orbit_title", title)
 	if sessionID != "" {
-		command("set-option", "-t", name, "@orbit_session", sessionID).Run()
+		run("set-option", "-t", name, "@orbit_session", sessionID)
 	}
 	time.Sleep(Delay("ORBIT_SPAWN_DELAY", 900*time.Millisecond))
-	return command("send-keys", "-t", name, cmd, "Enter").Run()
+	return run("send-keys", "-t", name, cmd, "Enter")
 }
 
 func UniqueName(base string) string {
@@ -168,10 +193,10 @@ func UniqueName(base string) string {
 	}
 }
 
-func Kill(name string) error { return command("kill-session", "-t", name).Run() }
+func Kill(name string) error { return run("kill-session", "-t", name) }
 
 func Capture(name string, lines int) string {
-	out, err := command("capture-pane", "-p", "-t", name, "-S", "-"+strconv.Itoa(lines)).Output()
+	out, err := output("capture-pane", "-p", "-t", name, "-S", "-"+strconv.Itoa(lines))
 	if err != nil {
 		return ""
 	}
@@ -180,12 +205,12 @@ func Capture(name string, lines int) string {
 
 // Link records which transcript a session turned out to be writing to.
 func Link(name, sessionID string) {
-	command("set-option", "-t", name, "@orbit_session", sessionID).Run()
+	run("set-option", "-t", name, "@orbit_session", sessionID)
 }
 
 // Retitle keeps the tab label in sync as the agent renames the session.
 func Retitle(name, title string) {
-	command("set-option", "-t", name, "@orbit_title", title).Run()
+	run("set-option", "-t", name, "@orbit_title", title)
 }
 
 // OpenTab drives Ghostty's own cmd+T through System Events, landing the session
@@ -277,4 +302,4 @@ func Available() bool {
 
 // KillServerForTest tears down the orbit tmux server. Only integration tests
 // should need this; normal teardown is per-session via Kill.
-func KillServerForTest() error { return command("kill-server").Run() }
+func KillServerForTest() error { return run("kill-server") }

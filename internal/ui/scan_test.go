@@ -25,7 +25,7 @@ func TestScanIsSingleFlight(t *testing.T) {
 		t.Error("a second scan started while one was still in flight")
 	}
 
-	m.Update(scanMsg(nil)) // the scan lands
+	m.Update(scanMsg{gen: m.scanGen}) // the scan lands
 	if m.scanning {
 		t.Error("scanMsg should clear the in-flight flag")
 	}
@@ -48,7 +48,7 @@ func TestRefreshDuringScanIsQueuedNotDropped(t *testing.T) {
 		t.Fatal("refresh during a scan should have been remembered")
 	}
 
-	m.Update(scanMsg(nil))
+	m.Update(scanMsg{gen: m.scanGen})
 	if m.rescan {
 		t.Error("the queued refresh should have been consumed")
 	}
@@ -88,7 +88,7 @@ func TestScanRunsSafelyAlongsideTheUI(t *testing.T) {
 	m.w, m.h = 120, 30
 
 	// Seed the model, so what the UI renders below is a previous scan's output.
-	m.Update(scan(session.NewIndex()))
+	m.Update(scan(m.scanGen, session.NewIndex()))
 
 	cmd := m.scanCmd()
 	if cmd == nil {
@@ -162,9 +162,9 @@ func TestScanLandingTriggersThePrune(t *testing.T) {
 		t.Skip("summaries disabled in the shipped default")
 	}
 
-	m.Update(scanMsg([]*session.Session{
+	m.Update(scanMsg{gen: m.scanGen, sessions: []*session.Session{
 		{Agent: session.Claude, ID: "a", Cwd: "/tmp", Title: "t", Modified: time.Now()},
-	}))
+	}})
 	if !m.pruned {
 		t.Error("a scan landing with sessions should have swept the summary cache")
 	}
@@ -186,10 +186,10 @@ func TestSortChosenDuringAScanSurvivesItsArrival(t *testing.T) {
 	m.sort = session.SortTokens // `o`, while it is in flight
 
 	now := time.Now()
-	m.Update(scanMsg([]*session.Session{
+	m.Update(scanMsg{gen: m.scanGen, sessions: []*session.Session{
 		{Agent: session.Claude, ID: "small", Cwd: "/a", Title: "s", Tokens: 10, Modified: now},
 		{Agent: session.Codex, ID: "big", Cwd: "/b", Title: "b", Tokens: 9000, Modified: now.Add(-time.Hour)},
-	}))
+	}})
 
 	if len(m.view) != 2 {
 		t.Fatalf("expected 2 sessions, got %d", len(m.view))

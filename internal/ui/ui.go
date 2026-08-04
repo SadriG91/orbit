@@ -65,8 +65,11 @@ func agentStyle(a session.Agent) lipgloss.Style {
 }
 
 type (
-	tickMsg    time.Time
-	scanMsg    []*session.Session
+	tickMsg time.Time
+	scanMsg struct {
+		gen      int
+		sessions []*session.Session
+	}
 	previewMsg struct{ name, text string }
 	statusMsg  string
 	searchMsg  struct {
@@ -111,9 +114,11 @@ type Model struct {
 	sort        session.SortMode
 	group       bool
 
-	scanning bool // a scan is in flight; see scanCmd
-	rescan   bool // an explicit refresh arrived mid-scan and owes us another
-	pruned   bool // the summary cache has been swept once, after the first scan
+	scanning  bool      // a scan is in flight; see scanCmd
+	rescan    bool      // an explicit refresh arrived mid-scan and owes us another
+	scanGen   int       // increments per issued scan; stale results are discarded
+	scanStart time.Time // when the in-flight scan began, for the watchdog
+	pruned    bool      // the summary cache has been swept once, after the first scan
 
 	searching bool
 	query     string                    // the committed full-text query
@@ -179,8 +184,41 @@ func (m *Model) scanCmd() tea.Cmd {
 		return nil
 	}
 	m.scanning = true
-	ix := m.ix
-	return func() tea.Msg { return scan(ix) }
+	m.scanStart = time.Now()
+	m.scanGen++
+	gen, ix := m.scanGen, m.ix
+	return func() tea.Msg { return scan(gen, ix) }
+}
+
+// scanStuck is how long a scan may run before the watchdog gives up on it.
+// Well past a cold start over a few hundred transcripts, and well past the
+// timeouts on the subprocesses a scan shells out to, so reaching it means
+// something is genuinely wedged rather than slow.
+const scanStuck = 90 * time.Second
+
+// recoverStuckScan is the escape hatch for the single-flight flag.
+//
+// scanning is only cleared when a result arrives, so anything that stops one
+// arriving leaves the dashboard silently frozen — no refresh, no error, no way
+// back. The subprocess timeouts remove the likely causes; this covers the ones
+// nobody thought of.
+//
+// Recovery cannot simply clear the flag. The stuck scan is still running, and
+// starting another against the same Index is the concurrent map write that
+// single-flight exists to prevent. So the abandoned scan is disowned instead:
+// the generation moves on, which makes its eventual result stale and ignored,
+// and it is left with the old Index while a fresh one is installed. Losing the
+// parse cache costs one slow scan; sharing it costs a crash.
+func (m *Model) recoverStuckScan() tea.Cmd {
+	if !m.scanning || time.Since(m.scanStart) < scanStuck {
+		return nil
+	}
+	m.scanGen++
+	m.ix = session.NewIndex()
+	m.scanning = false
+	m.say("a scan stopped responding after " +
+		format.Itoa(int(time.Since(m.scanStart).Seconds())) + "s — restarting it")
+	return m.scanCmd()
 }
 
 // refreshCmd is scanCmd for the cases where dropping the request would be
@@ -196,7 +234,7 @@ func (m *Model) refreshCmd() tea.Cmd {
 
 // scan reads every transcript store, joins it with live tmux state, and links
 // sessions started with `n` to whatever transcript they turned out to write.
-func scan(ix *session.Index) tea.Msg {
+func scan(gen int, ix *session.Index) tea.Msg {
 	sessions := ix.Scan()
 	byID := map[string]*session.Session{}
 	for _, s := range sessions {
@@ -246,7 +284,7 @@ func scan(ix *session.Index) tea.Msg {
 	for _, s := range sessions {
 		s.Resolve(now)
 	}
-	return scanMsg(sessions)
+	return scanMsg{gen: gen, sessions: sessions}
 }
 
 func (m *Model) capture() tea.Cmd {
@@ -510,6 +548,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		if cmd := m.recoverStuckScan(); cmd != nil {
+			return m, tea.Batch(cmd, m.capture(), tick())
+		}
 		return m, tea.Batch(m.scanCmd(), m.capture(), tick())
 
 	case searchMsg:
@@ -534,9 +575,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.pump()
 
 	case scanMsg:
+		// A result the watchdog already gave up on: its Index has been
+		// replaced and a newer scan is in flight, so this is stale by
+		// definition and must not clear the flag guarding that one.
+		if msg.gen != m.scanGen {
+			return m, nil
+		}
 		wasIdle := !m.anyWorking()
 		m.scanning = false
-		m.all = msg
+		m.all = msg.sessions
 		// Order it here rather than in the scan, so a sort or grouping chosen
 		// while the scan was in flight survives its arrival instead of being
 		// silently reverted until the next tick.

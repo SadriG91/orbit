@@ -231,11 +231,32 @@ func (s SortMode) String() string {
 
 // Index caches parsed sessions. File-backed transcripts are re-read only when
 // mtime or size changes, so ticking across ~200 files costs a stat() each.
+// Index caches parsed transcripts. It guards its own state rather than relying
+// on callers to serialise: single-flight scanning upstream is an efficiency
+// measure and a recovery path may legitimately overlap two scans, so the
+// invariant belongs to the type. A concurrent map write here is fatal, not
+// merely wrong.
 type Index struct {
+	mu      sync.Mutex
 	files   map[string]cached
 	cpCache []*Session
 	cpStamp string
-	Errs    []string
+
+	errsMu sync.Mutex
+	errs   []string
+}
+
+// Errs returns any non-fatal problems from the last scan.
+func (ix *Index) Errs() []string {
+	ix.errsMu.Lock()
+	defer ix.errsMu.Unlock()
+	return append([]string(nil), ix.errs...)
+}
+
+func (ix *Index) addErr(msg string) {
+	ix.errsMu.Lock()
+	defer ix.errsMu.Unlock()
+	ix.errs = append(ix.errs, msg)
 }
 
 type cached struct {
@@ -256,7 +277,10 @@ func NewIndex() *Index { return &Index{files: map[string]cached{}} }
 // replaced wholesale on every scan, never mutated in place — so a shallow copy
 // is a complete one.
 func (ix *Index) Scan() []*Session {
-	ix.Errs = nil
+	ix.errsMu.Lock()
+	ix.errs = nil
+	ix.errsMu.Unlock()
+
 	var out []*Session
 	out = append(out, ix.scanClaude()...)
 	out = append(out, ix.scanCodex()...)
@@ -285,7 +309,10 @@ func (ix *Index) scanPaths(paths []string, ag Agent, parse func(string, time.Tim
 		if err != nil {
 			continue
 		}
-		if c, ok := ix.files[p]; ok && c.mod.Equal(info.ModTime()) && c.size == info.Size() {
+		ix.mu.Lock()
+		c, ok := ix.files[p]
+		ix.mu.Unlock()
+		if ok && c.mod.Equal(info.ModTime()) && c.size == info.Size() {
 			if c.s != nil {
 				out = append(out, c.s)
 			}
@@ -314,9 +341,13 @@ func (ix *Index) scanPaths(paths []string, ag Agent, parse func(string, time.Tim
 	}
 	wg.Wait()
 
+	ix.mu.Lock()
 	for i, j := range todo {
 		// Cache misses too, so junk files aren't re-parsed every tick.
 		ix.files[j.path] = cached{j.info.ModTime(), j.info.Size(), results[i]}
+	}
+	ix.mu.Unlock()
+	for i := range todo {
 		if results[i] != nil {
 			out = append(out, results[i])
 		}

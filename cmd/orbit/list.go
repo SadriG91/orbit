@@ -40,7 +40,7 @@ func listSessions(asJSON bool) {
 			format.Truncate(s.ShortCwd(), 22), format.Truncate(format.FirstLine(s.Name()), 46), s.ID)
 	}
 	fmt.Fprintf(os.Stderr, "\n%d sessions\n", len(sessions))
-	for _, e := range ix.Errs {
+	for _, e := range ix.Errs() {
 		fmt.Fprintln(os.Stderr, "warn:", e)
 	}
 }

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,17 +54,26 @@ func (ix *Index) scanCopilot() []*Session {
 	if stamp == "" {
 		return nil
 	}
-	if stamp == ix.cpStamp {
-		return ix.cpCache
+	ix.mu.Lock()
+	cached, cachedStamp := ix.cpCache, ix.cpStamp
+	ix.mu.Unlock()
+	if stamp == cachedStamp {
+		return cached
 	}
 
 	// Read-only + immutable-free URI so a live Copilot holding the WAL can't block us.
 	uri := "file:" + db + "?mode=ro"
-	cmd := exec.Command("sqlite3", "-readonly", "-separator", "\x1f", uri, copilotQuery)
+	// A timeout, because this is a subprocess reading a database another
+	// process may be holding: a locked WAL blocks sqlite3, and an unbounded
+	// wait here would hang the whole scan with no way out.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sqlite3", "-readonly", "-separator", "\x1f", uri, copilotQuery)
 	out, err := cmd.Output()
 	if err != nil {
-		ix.Errs = append(ix.Errs, "copilot: "+err.Error())
-		return ix.cpCache
+		ix.addErr("copilot: " + err.Error())
+		return cached
 	}
 
 	var res []*Session
@@ -108,6 +118,8 @@ func (ix *Index) scanCopilot() []*Session {
 		}
 		res = append(res, s)
 	}
+	ix.mu.Lock()
 	ix.cpCache, ix.cpStamp = res, stamp
+	ix.mu.Unlock()
 	return res
 }
