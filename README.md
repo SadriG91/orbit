@@ -76,6 +76,18 @@ auto = false
 
 or per run with `--no-update` / `ORBIT_NO_UPDATE=1`.
 
+The Go tests cover the pieces; the last step — orbit exec'ing the new build
+over itself — needs a real terminal, so it has a script instead:
+
+```sh
+./scripts/check-self-update.sh
+```
+
+It builds a deliberately stale orbit in a scratch directory with its own
+`HOME`, drives it under a pty, and checks that it announces the update,
+replaces its own binary, and survives the restart with the same pid. Your
+install, config and update cache are not touched, and it never runs brew.
+
 ### Releasing
 
 Pushing a `v*` tag is the whole process: CI cross-compiles for macOS and Linux
@@ -247,6 +259,7 @@ internal/
   search/           full-text search over transcript bodies
   summary/          cached, incrementally-updated summaries
   update/           the once-a-day release check and self-update
+scripts/            checks that need a real terminal, not a test runner
   ui/               Bubble Tea model, rendering, logos, notifications
 test/               integration tests that touch the real system
 ```
