@@ -1,9 +1,6 @@
 name: release
 
-# Tag-driven: pushing v* is the whole release process. Everything else —
-# testing on both platforms, building for four, checksums, notes, provenance,
-# publishing, and updating the Homebrew tap — happens here, so none of it can
-# be half-done or forgotten.
+# Pushing a v* tag is the whole release process.
 on:
   push:
     tags: ["v*"]
@@ -12,9 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  # A tag can be pushed at any commit, including one CI never saw. Releasing
-  # without re-running the suite here would make "green on main" an assumption
-  # rather than a fact about the thing being shipped.
+  # A tag can sit on a commit CI never saw, so re-run the suite here.
   test:
     uses: ./.github/workflows/test.yml
 
@@ -44,25 +39,15 @@ jobs:
           # Scoped to the tap repo only. GITHUB_TOKEN cannot write to it.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
-      # Lets anyone verify a downloaded archive was built by this workflow from
-      # this commit: `gh attestation verify <file> --repo SadriG91/orbit`.
-      # Worth having for binaries strangers are asked to trust.
-      #
-      # From v4 this is a thin wrapper over actions/attest, which GitHub now
-      # points new setups at directly. Kept as-is: same inputs, and the name
-      # says which of the several attestation kinds this is.
+      # Verify with: gh attestation verify <file> --repo SadriG91/orbit
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*.tar.gz
 
-      # GoReleaser generates the cask but doesn't push it (skip_upload): its
-      # Ruby trips brew's RuboCop rules — stanza grouping, array indentation —
-      # and pushing it raw turned the tap's CI red on every release, with a
-      # style-fix commit chasing it seconds later. Styling the file from dist/
-      # first means the tap only ever sees one commit, already green. The fix
-      # is best-effort on purpose: a new, non-autocorrectable offence should
-      # show up as a red audit on the tap, not as a release that never
-      # published its cask.
+      # GoReleaser generates the cask (skip_upload) but its Ruby fails brew
+      # style, so style it before pushing — one green commit on the tap.
+      # --fix is best-effort: a new offence should show as a red audit there,
+      # not block the release.
       - name: publish the cask
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
