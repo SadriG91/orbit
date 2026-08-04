@@ -269,8 +269,10 @@ func transcriptExcerpt(s *session.Session, maxChars int) (string, error) {
 	if len(out) > maxChars {
 		// Keep both ends: the opening says what the session was for, the tail
 		// says how it went. Cutting only the front would lose the intent.
+		// Cut on rune boundaries — a half-character at either seam is a byte of
+		// noise in the model's input.
 		half := maxChars / 2
-		out = out[:half] + "\n[...]\n" + out[len(out)-half:]
+		out = format.SliceRunes(out, 0, half) + "\n[...]\n" + format.SliceRunes(out, len(out)-half, len(out))
 	}
 	if strings.TrimSpace(out) == "" {
 		return "", errEmptySummary

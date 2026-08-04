@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/sadrig91/orbit/internal/session"
@@ -126,4 +127,43 @@ func fakeHome(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return home
+}
+
+// Prune had no callers, so the summary cache grew a file per session forever.
+// It now runs once, off the first scan — but never against an empty list, since
+// a store that failed to read looks exactly like every session being deleted.
+func TestPruneRunsOnceAndNeverOnAnEmptyList(t *testing.T) {
+	m := New(testConfig(), "inline")
+
+	if cmd := m.pruneCmd(); cmd != nil {
+		t.Error("pruned against an empty session list; a failed store read would wipe the cache")
+	}
+	if m.pruned {
+		t.Error("an empty list must not count as having pruned")
+	}
+
+	m.all = []*session.Session{{Agent: session.Claude, ID: "a", Cwd: "/tmp"}}
+	if cmd := m.pruneCmd(); cmd == nil {
+		t.Fatal("expected a prune once sessions were known")
+	}
+	if cmd := m.pruneCmd(); cmd != nil {
+		t.Error("prune should run once per process, not on every scan")
+	}
+}
+
+// The call site, not just the guard: a scan landing with sessions in it has to
+// be what triggers the sweep. Prune spent this whole time being correct,
+// tested-adjacent and simply never called.
+func TestScanLandingTriggersThePrune(t *testing.T) {
+	m := New(testConfig(), "inline")
+	if !m.cfg.Summary.Enabled {
+		t.Skip("summaries disabled in the shipped default")
+	}
+
+	m.Update(scanMsg([]*session.Session{
+		{Agent: session.Claude, ID: "a", Cwd: "/tmp", Title: "t", Modified: time.Now()},
+	}))
+	if !m.pruned {
+		t.Error("a scan landing with sessions should have swept the summary cache")
+	}
 }

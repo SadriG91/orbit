@@ -113,6 +113,7 @@ type Model struct {
 
 	scanning bool // a scan is in flight; see scanCmd
 	rescan   bool // an explicit refresh arrived mid-scan and owes us another
+	pruned   bool // the summary cache has been swept once, after the first scan
 
 	searching bool
 	query     string                    // the committed full-text query
@@ -334,6 +335,22 @@ func (m *Model) shouldAutoSummarise(s *session.Session) bool {
 	return rec.Behind(s) >= minNew
 }
 
+// pruneCmd sweeps cached summaries whose sessions are gone. It runs once, after
+// the first scan has established what still exists, and never on an empty list:
+// a store that failed to read would otherwise be indistinguishable from every
+// session having been deleted, and the whole cache would go with it.
+func (m *Model) pruneCmd() tea.Cmd {
+	if m.pruned || !m.cfg.Summary.Enabled || len(m.all) == 0 {
+		return nil
+	}
+	m.pruned = true
+	all := m.all
+	return func() tea.Msg {
+		summary.Prune(all)
+		return nil
+	}
+}
+
 // summariseAll queues every visible session that has no summary yet. The global
 // progress bar then advances as each finishes.
 func (m *Model) summariseAll() tea.Cmd {
@@ -520,6 +537,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		var cmds []tea.Cmd
+		if cmd := m.pruneCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if m.rescan {
 			m.rescan = false
 			cmds = append(cmds, m.scanCmd())

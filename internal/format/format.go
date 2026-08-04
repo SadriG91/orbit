@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 func FirstLine(s string) string {
@@ -25,6 +26,30 @@ func Truncate(s string, n int) string {
 		return s
 	}
 	return strings.TrimRight(string(r[:n-1]), " ") + "…"
+}
+
+// SliceRunes is s[start:end] with both bounds moved outward to the nearest rune
+// boundary. Cutting a string at a computed byte offset — a search snippet
+// window, an excerpt trimmed to a character budget — otherwise splits whatever
+// multi-byte character straddles the cut and leaves a stray continuation byte,
+// which the terminal renders as a replacement glyph and lipgloss miscounts.
+func SliceRunes(s string, start, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(s) {
+		end = len(s)
+	}
+	if start >= end {
+		return ""
+	}
+	for start > 0 && !utf8.RuneStart(s[start]) {
+		start--
+	}
+	for end < len(s) && !utf8.RuneStart(s[end]) {
+		end++
+	}
+	return s[start:end]
 }
 
 func Pad(s string, n int) string {
