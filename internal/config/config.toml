@@ -63,3 +63,12 @@ command = ["codex", "exec", "--model", "gpt-5-mini", "--sandbox", "read-only", "
 
 [summary.copilot]
 command = ["copilot", "-p", "-s", "--no-ask-user", "--available-tools", ""]
+
+[update]
+# Check GitHub for a newer orbit on start — at most once a day, cached in
+# ~/.cache/orbit/update.json — and install it, the same way this copy was
+# installed: through brew for a Homebrew install, `go install` for a
+# go-installed one, and a checksum-verified binary swap otherwise. orbit
+# restarts itself once the new version is in place. Set ORBIT_NO_UPDATE=1 to
+# skip it for one run.
+auto = true

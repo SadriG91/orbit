@@ -58,6 +58,24 @@ tmux is required either way. [Ghostty](https://ghostty.org) (1.3+ for the
 best experience) or iTerm2 is optional but gets you tab spawning and desktop
 notifications.
 
+### Staying current
+
+orbit checks GitHub for a newer release when it starts — at most once a day,
+cached in `~/.cache/orbit/update.json` — and installs it the same way this
+copy was installed: `brew upgrade` for a Homebrew install, `go install` for a
+go-installed one, and a checksum-verified binary swap otherwise. The status
+line says what it's doing, and orbit restarts itself once the new version is
+in place and has confirmed its own version.
+
+Turn it off in `~/.config/orbit/config.toml`:
+
+```toml
+[update]
+auto = false
+```
+
+or per run with `--no-update` / `ORBIT_NO_UPDATE=1`.
+
 ### Releasing
 
 Pushing a `v*` tag is the whole process: CI cross-compiles for macOS and Linux
@@ -225,8 +243,10 @@ internal/
   format/           shared string and time helpers
   session/          the session model: agents, parsers, index, sorting
   tmux/             the private tmux server; knows nothing about agents
+  term/             Ghostty and iTerm2: opening tabs, focusing them back
   search/           full-text search over transcript bodies
   summary/          cached, incrementally-updated summaries
+  update/           the once-a-day release check and self-update
   ui/               Bubble Tea model, rendering, logos, notifications
 test/               integration tests that touch the real system
 ```

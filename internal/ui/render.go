@@ -457,6 +457,12 @@ func stateColor(s session.State) color.Color {
 }
 
 func (m *Model) footer() string {
+	// An update outlives the usual status timeout: it is the one thing that
+	// ends with orbit restarting itself, so it stays on screen throughout
+	// rather than expiring mid-download and leaving that unexplained.
+	if m.updating {
+		return " " + sHead.Render(m.spin.View()+" "+m.status)
+	}
 	if m.status != "" && time.Now().Before(m.statusUntil) {
 		st := sHead
 		if strings.Contains(m.status, "failed") || strings.Contains(m.status, "not installed") {

@@ -23,6 +23,20 @@ type Config struct {
 	SpawnDelay string  `toml:"spawn_delay"`
 	TabDelay   string  `toml:"tab_delay"`
 	Summary    Summary `toml:"summary"`
+	Update     Update  `toml:"update"`
+}
+
+type Update struct {
+	Auto bool `toml:"auto"`
+}
+
+// AutoUpdate lets the environment turn updating off for a single run, and
+// gives packagers a way to disable it for a build they manage themselves.
+func (c Config) AutoUpdate() bool {
+	if os.Getenv("ORBIT_NO_UPDATE") != "" {
+		return false
+	}
+	return c.Update.Auto
 }
 
 type Summary struct {

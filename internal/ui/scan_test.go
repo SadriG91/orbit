@@ -16,7 +16,7 @@ import (
 // two scans into Index.files at once — a fatal concurrent map write, not a
 // benign race.
 func TestScanIsSingleFlight(t *testing.T) {
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 
 	if first := m.scanCmd(); first == nil {
 		t.Fatal("the first scan should have been issued")
@@ -38,7 +38,7 @@ func TestScanIsSingleFlight(t *testing.T) {
 // refresh that follows a kill or an attach leaves the list visibly wrong, so
 // those are remembered instead of discarded.
 func TestRefreshDuringScanIsQueuedNotDropped(t *testing.T) {
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 	m.scanCmd() // something is now in flight
 
 	if cmd := m.refreshCmd(); cmd != nil {
@@ -84,7 +84,7 @@ func TestScanHandsOutCopies(t *testing.T) {
 // index hands out the sessions the UI is rendering.
 func TestScanRunsSafelyAlongsideTheUI(t *testing.T) {
 	fakeHome(t)
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 	m.w, m.h = 120, 30
 
 	// Seed the model, so what the UI renders below is a previous scan's output.
@@ -134,7 +134,7 @@ func fakeHome(t *testing.T) string {
 // a store that failed to read looks exactly like every session being deleted.
 func TestPruneRunsOnceAndNeverOnAnEmptyList(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // never point a prune at a real cache
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 
 	if cmd := m.pruneCmd(); cmd != nil {
 		t.Error("pruned against an empty session list; a failed store read would wipe the cache")
@@ -157,7 +157,7 @@ func TestPruneRunsOnceAndNeverOnAnEmptyList(t *testing.T) {
 // tested-adjacent and simply never called.
 func TestScanLandingTriggersThePrune(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // never point a prune at a real cache
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 	if !m.cfg.Summary.Enabled {
 		t.Skip("summaries disabled in the shipped default")
 	}
@@ -176,7 +176,7 @@ func TestScanLandingTriggersThePrune(t *testing.T) {
 // with grouping on, leaving the list out of project order under repeated
 // group headers.
 func TestSortChosenDuringAScanSurvivesItsArrival(t *testing.T) {
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 	m.w, m.h = 120, 30
 
 	cmd := m.scanCmd() // issued while sorting by age
@@ -205,7 +205,7 @@ func TestSortChosenDuringAScanSurvivesItsArrival(t *testing.T) {
 // swapping elements of the same backing array they are ranging over.
 func TestCommandsDoNotShareTheSortedBackingArray(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 	now := time.Now()
 	m.all = []*session.Session{
 		{Agent: session.Claude, ID: "a", Cwd: "/a", Title: "a", Tokens: 1, Modified: now},

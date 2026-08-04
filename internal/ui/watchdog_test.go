@@ -15,7 +15,7 @@ import (
 // scanning is only cleared when a result arrives, so anything that stops one
 // arriving freezes the dashboard with no error and no way back.
 func TestStuckScanRecovers(t *testing.T) {
-	m := New(testConfig(), "inline")
+	m := New(testConfig(), "inline", "dev")
 
 	if cmd := m.scanCmd(); cmd == nil {
 		t.Fatal("first scan should have been issued")

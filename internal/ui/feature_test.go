@@ -99,6 +99,63 @@ func TestAlreadyOpenDecidesWhenToFocus(t *testing.T) {
 	}
 }
 
+// Updating ends with orbit replacing itself, so the sequence has to be
+// visible on the way through and must only hand main a binary to exec when
+// the install actually succeeded.
+func TestUpdateSequence(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 120, 40
+
+	// A failed update leaves this orbit running and says so — no relaunch.
+	m.Update(updateFoundMsg{version: "v9.9.9"})
+	if !m.updating {
+		t.Error("the update is not marked in flight, so the spinner would stop")
+	}
+	if s := stripANSI(m.footer()); !strings.Contains(s, "updating orbit to v9.9.9") {
+		t.Errorf("footer does not show the update: %q", s)
+	}
+	m.Update(updateDoneMsg{version: "v9.9.9", err: "brew upgrade: exit 1"})
+	if m.updating {
+		t.Error("still marked in flight after finishing")
+	}
+	if m.Relaunch() != "" {
+		t.Error("a failed update must not trigger a restart")
+	}
+	if s := stripANSI(m.footer()); !strings.Contains(s, "failed") {
+		t.Errorf("a failed update was not reported: %q", s)
+	}
+
+	// A successful one arms the relaunch and says what will happen.
+	m.Update(updateFoundMsg{version: "v9.9.9"})
+	m.Update(updateDoneMsg{version: "v9.9.9", exe: "/opt/homebrew/bin/orbit"})
+	if got := m.Relaunch(); got != "/opt/homebrew/bin/orbit" {
+		t.Errorf("Relaunch = %q, want the new binary", got)
+	}
+	if s := stripANSI(m.footer()); !strings.Contains(s, "restarting") {
+		t.Errorf("the restart was not announced: %q", s)
+	}
+}
+
+// The check must not fire when it's been turned off — a dashboard that phones
+// home after being told not to is a bug people don't forgive.
+func TestUpdateCheckRespectsConfig(t *testing.T) {
+	cfg := testConfig()
+	cfg.Update.Auto = false
+	if cmd := newTestModel(cfg, attachInline).updateCheckCmd(); cmd != nil {
+		t.Error("auto = false still scheduled a check")
+	}
+
+	cfg.Update.Auto = true
+	t.Setenv("ORBIT_NO_UPDATE", "1")
+	if cmd := newTestModel(cfg, attachInline).updateCheckCmd(); cmd != nil {
+		t.Error("ORBIT_NO_UPDATE did not stop the check")
+	}
+	t.Setenv("ORBIT_NO_UPDATE", "")
+	if cmd := newTestModel(cfg, attachInline).updateCheckCmd(); cmd == nil {
+		t.Error("auto = true scheduled no check")
+	}
+}
+
 // Automatic regeneration is the only path that spends money unprompted, so its
 // guards matter more than the feature.
 func TestAutoSummariseGuardsSpending(t *testing.T) {

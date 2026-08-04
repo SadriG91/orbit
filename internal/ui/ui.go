@@ -18,6 +18,7 @@ import (
 	"github.com/sadrig91/orbit/internal/summary"
 	"github.com/sadrig91/orbit/internal/term"
 	"github.com/sadrig91/orbit/internal/tmux"
+	"github.com/sadrig91/orbit/internal/update"
 )
 
 var (
@@ -83,6 +84,13 @@ type (
 	}
 	// sendLogosMsg fires once the alt screen exists — see logosCmd.
 	sendLogosMsg struct{}
+	// The update sequence: a release was found, it finished installing, and
+	// the pause before restarting has elapsed.
+	updateFoundMsg struct{ version string }
+	updateDoneMsg  struct {
+		version, exe, err string
+	}
+	relaunchMsg struct{}
 	// readyMsg says a tmux session now exists and is waiting to be attached.
 	readyMsg struct {
 		name, cwd string
@@ -130,11 +138,15 @@ type Model struct {
 	queue     []string      // session ids waiting to be summarised
 	summaryE  time.Duration // rolling estimate, shown as elapsed context only
 	notify    *Notifier
+
+	version  string // this build, for the update check
+	updating bool   // an update is in flight; keeps the spinner running
+	relaunch string // binary to exec once the program exits — see Relaunch
 }
 
 // New builds the dashboard. The attach override comes from a flag; empty means
 // use whatever the config says.
-func New(cfg config.Config, attachOverride string) *Model {
+func New(cfg config.Config, attachOverride, version string) *Model {
 	mode := parseAttachMode(cfg.Attach)
 	if attachOverride != "" {
 		mode = parseAttachMode(attachOverride)
@@ -146,7 +158,7 @@ func New(cfg config.Config, attachOverride string) *Model {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(cBright)
 	return &Model{
-		ix: session.NewIndex(), filter: ti, spin: sp, mode: mode,
+		ix: session.NewIndex(), filter: ti, spin: sp, mode: mode, version: version,
 		cfg: cfg, icons: ResolveIconMode(cfg.IconMode()), sort: session.ParseSortMode(cfg.Sort), group: cfg.Group,
 		summaries: map[string]summary.Record{}, pending: map[string]time.Time{},
 		notify:   NewNotifier(cfg.Notify),
@@ -156,8 +168,44 @@ func New(cfg config.Config, attachOverride string) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.scanCmd(), tick(), m.spin.Tick)
+	return tea.Batch(m.scanCmd(), tick(), m.spin.Tick, m.updateCheckCmd())
 }
+
+// updateCheckCmd asks whether a newer orbit exists, off the UI goroutine. The
+// check is cached for a day inside the update package, so this is usually a
+// file read; when it isn't, the dashboard is already drawing.
+func (m *Model) updateCheckCmd() tea.Cmd {
+	if !m.cfg.AutoUpdate() {
+		return nil
+	}
+	version := m.version
+	return func() tea.Msg {
+		if v := update.Check(version); v != "" {
+			return updateFoundMsg{version: v}
+		}
+		return nil
+	}
+}
+
+// updateApplyCmd installs the release. It can take minutes — brew refreshes
+// its taps first — so the status line says what is happening and the spinner
+// keeps moving while it does.
+func (m *Model) updateApplyCmd(version string) tea.Cmd {
+	m.updating = true
+	m.say("updating orbit to " + version + "…")
+	return tea.Batch(func() tea.Msg {
+		exe, err := update.Apply(version)
+		out := updateDoneMsg{version: version, exe: exe}
+		if err != nil {
+			out.err = err.Error()
+		}
+		return out
+	}, m.spin.Tick)
+}
+
+// restartPause is how long the "updated" message stays up before orbit
+// replaces itself. Long enough to read, short enough not to feel stuck.
+const restartPause = 2500 * time.Millisecond
 
 // logosCmd waits for the first frame to have been painted — and with it the
 // alt screen switch — before uploading the marks.
@@ -620,7 +668,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		// Only keep animating while something is actually working, so an idle
 		// dashboard costs nothing.
-		if len(m.pending) > 0 || m.anyWorking() {
+		if len(m.pending) > 0 || m.updating || m.anyWorking() {
 			return m, cmd
 		}
 		return m, nil
@@ -636,6 +684,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case readyMsg:
 		// Freshly spawned, so nothing can be attached yet — nothing to focus.
 		return m, m.attach(msg.name, msg.cwd, focusTarget{}, msg.mode)
+
+	case updateFoundMsg:
+		return m, m.updateApplyCmd(msg.version)
+
+	case updateDoneMsg:
+		m.updating = false
+		if msg.err != "" {
+			// Nothing is broken — this orbit still runs. Say so and move on.
+			m.say("update to " + msg.version + " failed: " + msg.err)
+			return m, nil
+		}
+		m.relaunch = msg.exe
+		m.say("updated to " + msg.version + " — restarting…")
+		return m, tea.Tick(restartPause, func(time.Time) tea.Msg { return relaunchMsg{} })
+
+	case relaunchMsg:
+		// Quit cleanly so Bubble Tea puts the terminal back; main execs the
+		// new binary once the program has returned.
+		return m, tea.Quit
 
 	case tea.KeyPressMsg:
 		if m.filtering {
@@ -896,6 +963,11 @@ func (m *Model) kill() tea.Cmd {
 		return statusMsg("killed " + name)
 	}
 }
+
+// Relaunch is the binary to exec once the program has exited, or "" to just
+// quit. Set when an update installed successfully: the process running now is
+// the old version, and only an exec makes the new one take effect.
+func (m *Model) Relaunch() string { return m.relaunch }
 
 // Warn seeds the status line before the first frame, for startup notices —
 // stderr would be wiped the moment the alt screen comes up.

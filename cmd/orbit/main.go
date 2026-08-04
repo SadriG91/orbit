@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -22,6 +23,7 @@ func main() {
 		window      = flag.Bool("window", false, "attach sessions in a new Ghostty window instead of a tab")
 		inline      = flag.Bool("inline", false, "attach in this terminal instead of spawning a tab")
 		noNotify    = flag.Bool("no-notify", false, "don't send desktop notifications when a session wants you")
+		noUpdate    = flag.Bool("no-update", false, "don't check for or install a newer orbit on start")
 		list        = flag.Bool("list", false, "print the session index as plain text and exit")
 		asJSON      = flag.Bool("json", false, "print the session index as JSON and exit")
 		probe       = flag.Bool("probe-logos", false, "render the agent logos to check terminal support")
@@ -54,6 +56,9 @@ func main() {
 	if *noNotify {
 		cfg.Notify = false
 	}
+	if *noUpdate {
+		cfg.Update.Auto = false
+	}
 
 	attach := ""
 	switch {
@@ -63,12 +68,23 @@ func main() {
 		attach = "window"
 	}
 
-	m := ui.New(cfg, attach)
+	m := ui.New(cfg, attach, version)
 	defer m.Close()
 	m.Warn(term.Preflight())
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		die(err)
+	}
+
+	// An update installed while orbit was running: the process still in
+	// memory is the old build, so hand the terminal to the new one. This is
+	// deliberately after Run returns, when Bubble Tea has restored the
+	// terminal — exec never comes back, so anything left undone stays undone.
+	if exe := m.Relaunch(); exe != "" {
+		m.Close()
+		if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+			die(fmt.Errorf("restart after update: %w", err))
+		}
 	}
 }
 

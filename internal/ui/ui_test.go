@@ -147,4 +147,4 @@ func stripANSI(s string) string {
 }
 
 // newTestModel builds a Model straight from a config, bypassing flag handling.
-func newTestModel(cfg config.Config, _ attachMode) *Model { return New(cfg, "inline") }
+func newTestModel(cfg config.Config, _ attachMode) *Model { return New(cfg, "inline", "dev") }
