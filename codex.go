@@ -66,7 +66,8 @@ func parseCodex(path string, mod time.Time) *Session {
 		if json.Unmarshal(line, &r) != nil {
 			continue
 		}
-		if r.Timestamp != "" {
+		// event_msg is codex's actual event stream; anything else is metadata.
+		if r.Timestamp != "" && r.Type == "event_msg" {
 			lastStamp = r.Timestamp
 		}
 		switch r.Type {

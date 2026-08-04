@@ -79,9 +79,6 @@ func parseClaude(path string, mod time.Time) *Session {
 		if json.Unmarshal(line, &r) != nil {
 			continue
 		}
-		if r.Timestamp != "" {
-			lastStamp = r.Timestamp
-		}
 		if r.Cwd != "" {
 			s.Cwd = r.Cwd
 		}
@@ -98,6 +95,13 @@ func parseClaude(path string, mod time.Time) *Session {
 		case "user", "assistant":
 			if r.IsSidechain || r.IsMeta || r.Message == nil {
 				continue
+			}
+			// Only conversation turns date the session. Claude Code appends
+			// bare `system` records to old transcripts long after the fact,
+			// which would otherwise make a five-day-old session look an hour
+			// old — the same trap as mtime, one layer in.
+			if r.Timestamp != "" {
+				lastStamp = r.Timestamp
 			}
 			blocks := blockTypes(r.Message.Content)
 			if r.Type == "assistant" {
