@@ -4,8 +4,10 @@ project_name: orbit
 
 before:
   hooks:
+    # No test hook: the release workflow gates on the full suite across both
+    # platforms before this runs, and repeating it here would only re-test
+    # macOS while implying more.
     - go mod tidy
-    - go test ./...
 
 builds:
   - main: ./cmd/orbit

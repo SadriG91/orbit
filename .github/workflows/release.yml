@@ -1,21 +1,30 @@
 name: release
 
 # Tag-driven: pushing v* is the whole release process. Everything else —
-# building for four platforms, checksums, notes, publishing, and updating the
-# Homebrew tap — happens here, so none of it can be half-done or forgotten.
+# testing on both platforms, building for four, checksums, notes, provenance,
+# publishing, and updating the Homebrew tap — happens here, so none of it can
+# be half-done or forgotten.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write # create the GitHub release
+  contents: read
 
 jobs:
+  # A tag can be pushed at any commit, including one CI never saw. Releasing
+  # without re-running the suite here would make "green on main" an assumption
+  # rather than a fact about the thing being shipped.
+  test:
+    uses: ./.github/workflows/test.yml
+
   release:
-    # Built on macOS because that is the primary target and the platform the
-    # integration tests actually exercise; the binaries themselves are
-    # cross-compiled and static.
+    needs: test
     runs-on: macos-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the provenance attestation
+      attestations: write
     steps:
       - uses: actions/checkout@v5
         with:
@@ -26,9 +35,6 @@ jobs:
           go-version: stable
           cache: true
 
-      - name: install tmux
-        run: brew install tmux # the pre-release test hook needs it
-
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
@@ -37,3 +43,31 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Scoped to the tap repo only. GITHUB_TOKEN cannot write to it.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      # Lets anyone verify a downloaded archive was built by this workflow from
+      # this commit: `gh attestation verify <file> --repo SadriG91/orbit`.
+      # Worth having for binaries strangers are asked to trust.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
+      # GoReleaser's generated cask trips brew's RuboCop rules — stanza
+      # grouping and array indentation — which turns the tap's own CI red on
+      # every single release. The offences are all autocorrectable, so correct
+      # them rather than leaving a permanently failing check nobody reads.
+      - name: tidy the generated cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/SadriG91/homebrew-tap.git" tap
+          cd tap
+          brew style --fix Casks/orbit.rb || true
+          if git diff --quiet; then
+            echo "cask already style-clean"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Style-fix the generated orbit cask"
+          git push
