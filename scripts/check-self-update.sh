@@ -46,6 +46,8 @@ BIN="$SCRATCH/bin/orbit"
 LOG="$SCRATCH/session.log"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# Built before HOME is redirected, so the Go build and module caches are the
+# real ones — a scratch HOME here would re-download the whole module graph.
 say "building an out-of-date orbit (v0.0.1) at $BIN"
 go build -ldflags "-X main.version=v0.0.1" -o "$BIN" ./cmd/orbit || {
   bad "build failed"
@@ -65,7 +67,12 @@ say "latest release is $LATEST — expecting orbit to install it"
 # part that matters — checks the process is still alive after the restart.
 # syscall.Exec keeps the pid, so a live pid after "restarting" means the exec
 # replaced the program rather than the program dying.
-expect -f - "$BIN" "$LOG" "$LATEST" <<'EXPECT'
+# HOME is redirected for the run itself, and only here. orbit keeps its
+# once-a-day answer in ~/.cache/orbit/update.json, so without this the test
+# reads whatever the real one happens to say — which is how this script first
+# "failed": it installed the version cached from an earlier run rather than
+# the release it had just looked up.
+HOME="$SCRATCH" expect -f - "$BIN" "$LOG" "$LATEST" <<'EXPECT'
 set bin     [lindex $argv 0]
 set logfile [lindex $argv 1]
 set latest  [lindex $argv 2]
@@ -132,6 +139,16 @@ if [ "$GOT" = "$WANT_A" ] || [ "$GOT" = "$WANT_B" ]; then
   ok "binary on disk is now $GOT (was v0.0.1)"
 else
   bad "binary reports '$GOT', expected '$WANT_A'"
+fi
+
+# Isolation is a claim this script makes, so it checks it rather than
+# asserting it in a comment: the run's update cache must be in the scratch
+# HOME. If it isn't, the version installed above came from whatever the real
+# cache held and this whole run proved nothing.
+if [ -f "$SCRATCH/.cache/orbit/update.json" ]; then
+  ok "ran against an isolated HOME ($(cat "$SCRATCH/.cache/orbit/update.json"))"
+else
+  bad "no update cache in the scratch HOME — the run used your real one"
 fi
 
 # And no debris: a partial download must never be left beside the binary.
