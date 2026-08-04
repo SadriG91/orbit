@@ -75,6 +75,30 @@ func TestSummariseAllRespectsConcurrencyLimit(t *testing.T) {
 	}
 }
 
+// Opening a session that's already showing in a Ghostty tab must focus that
+// tab, not stack up a second one. tmux's attached flag is the ground truth;
+// inline is the deliberate exception (a second client there just mirrors).
+func TestAlreadyOpenDecidesWhenToFocus(t *testing.T) {
+	detached := &session.Session{Tmux: &tmux.Session{Name: "cl-w-1"}}
+	attached := &session.Session{Tmux: &tmux.Session{Name: "cl-w-1", Attached: true}}
+
+	if alreadyOpen(detached, attachTab) {
+		t.Error("a detached session has no tab to focus")
+	}
+	if alreadyOpen(&session.Session{}, attachTab) {
+		t.Error("a session with no tmux at all cannot be open anywhere")
+	}
+	if !alreadyOpen(attached, attachTab) {
+		t.Error("an attached session opened as a tab should focus, not reopen")
+	}
+	if !alreadyOpen(attached, attachWindow) {
+		t.Error("an attached session opened as a window should focus, not reopen")
+	}
+	if alreadyOpen(attached, attachInline) {
+		t.Error("inline attach mirrors on purpose and must not be redirected")
+	}
+}
+
 // Automatic regeneration is the only path that spends money unprompted, so its
 // guards matter more than the feature.
 func TestAutoSummariseGuardsSpending(t *testing.T) {

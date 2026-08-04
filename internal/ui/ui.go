@@ -16,6 +16,7 @@ import (
 	"github.com/sadrig91/orbit/internal/search"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/summary"
+	"github.com/sadrig91/orbit/internal/term"
 	"github.com/sadrig91/orbit/internal/tmux"
 )
 
@@ -633,7 +634,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshCmd()
 
 	case readyMsg:
-		return m, m.attach(msg.name, msg.cwd, msg.mode)
+		// Freshly spawned, so nothing can be attached yet — nothing to focus.
+		return m, m.attach(msg.name, msg.cwd, focusTarget{}, msg.mode)
 
 	case tea.KeyPressMsg:
 		if m.filtering {
@@ -787,7 +789,14 @@ func (m *Model) open(mode attachMode) tea.Cmd {
 		return nil
 	}
 	if s.Tmux != nil {
-		return m.attach(s.Tmux.Name, s.Cwd, mode)
+		// A session that's already on screen somewhere shouldn't get a second
+		// tab; pass what identifies its tab — the id recorded when it was
+		// opened, and the title it carries now — so attach can switch to it.
+		var focus focusTarget
+		if alreadyOpen(s, mode.resolve()) {
+			focus = focusTarget{id: s.Tmux.TabID, title: s.TabTitle()}
+		}
+		return m.attach(s.Tmux.Name, s.Cwd, focus, mode)
 	}
 	m.say("resuming " + s.Agent.String() + "…")
 	sess := s
@@ -815,23 +824,52 @@ func (m *Model) spawn(ag session.Agent, cwd string) tea.Cmd {
 	}
 }
 
+// focusTarget identifies the tab a session is already showing in: the tab id
+// recorded when orbit opened it (often empty — inherited sessions, terminals
+// without ids) and the tab title it carries now. Zero value means "nothing to
+// focus, just open".
+type focusTarget struct{ id, title string }
+
+func (f focusTarget) set() bool { return f.id != "" || f.title != "" }
+
 // attach hands the session to a tab, a window, or this very terminal. The
 // in-place path suspends orbit and restores it when you detach, so it works in
-// any terminal and needs no permissions — it's the fallback everywhere Ghostty
-// tab-spawning isn't available.
-func (m *Model) attach(name, cwd string, mode attachMode) tea.Cmd {
+// any terminal and needs no permissions — it's the fallback everywhere tab
+// and window spawning aren't available.
+//
+// When focus is set the session is already attached somewhere: switch to its
+// tab instead of opening another. Focusing is best-effort — the client might
+// be in a terminal we can't script, or the tab may have just closed — so a
+// miss falls through to opening as asked, which is never worse than what
+// happened before.
+func (m *Model) attach(name, cwd string, focus focusTarget, mode attachMode) tea.Cmd {
+	argv := tmux.AttachArgv(name)
 	switch mode.resolve() {
 	case attachTab:
 		return func() tea.Msg {
-			if err := tmux.OpenTab(name); err != nil {
+			if focus.set() && term.Focus(focus.id, focus.title) == nil {
+				return statusMsg("switched to the tab already showing " + name)
+			}
+			id, err := term.OpenTab(argv, cwd)
+			if err != nil {
 				return statusMsg("tab failed: " + err.Error())
+			}
+			if id != "" {
+				tmux.SetTab(name, id)
 			}
 			return statusMsg("attached " + name + " in a new tab")
 		}
 	case attachWindow:
 		return func() tea.Msg {
-			if err := tmux.OpenWindow(name, cwd); err != nil {
+			if focus.set() && term.Focus(focus.id, focus.title) == nil {
+				return statusMsg("switched to the window already showing " + name)
+			}
+			id, err := term.OpenWindow(argv, cwd)
+			if err != nil {
 				return statusMsg("window failed: " + err.Error())
+			}
+			if id != "" {
+				tmux.SetTab(name, id)
 			}
 			return statusMsg("attached " + name + " in a new window")
 		}
@@ -856,6 +894,14 @@ func (m *Model) kill() tea.Cmd {
 			return statusMsg("kill failed: " + err.Error())
 		}
 		return statusMsg("killed " + name)
+	}
+}
+
+// Warn seeds the status line before the first frame, for startup notices —
+// stderr would be wiped the moment the alt screen comes up.
+func (m *Model) Warn(s string) {
+	if s != "" {
+		m.say(s)
 	}
 }
 

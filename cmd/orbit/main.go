@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/sadrig91/orbit/internal/config"
+	"github.com/sadrig91/orbit/internal/term"
 	"github.com/sadrig91/orbit/internal/tmux"
 	"github.com/sadrig91/orbit/internal/ui"
 )
@@ -64,6 +65,7 @@ func main() {
 
 	m := ui.New(cfg, attach)
 	defer m.Close()
+	m.Warn(term.Preflight())
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		die(err)

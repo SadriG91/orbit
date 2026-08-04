@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/session"
+	"github.com/sadrig91/orbit/internal/term"
 
 	"charm.land/lipgloss/v2"
 )
@@ -375,6 +376,9 @@ func (m *Model) detail(w, h int) []string {
 	if t := format.HumanTokens(s.Tokens); t != "" {
 		meta = append(meta, sTok.Render(t+" tokens"))
 	}
+	if s.Tmux != nil && s.Tmux.Attached {
+		meta = append(meta, sMid.Render("on screen"))
+	}
 	meta = append(meta, sMid.Render(format.RelTime(s.Modified)+" ago"))
 	line := strings.Join(meta, sDim.Render(" · "))
 	if lbl := s.State.Label(); lbl != "" {
@@ -465,7 +469,7 @@ func (m *Model) footer() string {
 		{"f", "search"}, {"/", "filter"}, {"o", "sort"}, {"p", "group"},
 		{"x", "kill"}, {"a", "all"}, {"q", "quit"},
 	}
-	if canSpawnTab() {
+	if term.CanTab() {
 		keys = append(keys[:2], append([][2]string{{"w", "window"}}, keys[2:]...)...)
 	}
 	var ps []string

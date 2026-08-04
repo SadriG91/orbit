@@ -54,8 +54,9 @@ go install github.com/sadrig91/orbit/cmd/orbit@latest
 Or download a binary for your platform from
 [Releases](https://github.com/SadriG91/orbit/releases).
 
-tmux is required either way. [Ghostty](https://ghostty.org) is optional but
-gets you tab spawning and desktop notifications.
+tmux is required either way. [Ghostty](https://ghostty.org) (1.3+ for the
+best experience) or iTerm2 is optional but gets you tab spawning and desktop
+notifications.
 
 ### Releasing
 
@@ -87,7 +88,10 @@ notes, and updates the Homebrew cask in
 | `r`     | refresh now                                                |
 | `q`     | quit the dashboard — running sessions carry on             |
 
-`⏎` picks the best available: a Ghostty tab on macOS, otherwise in-place.
+`⏎` picks the best available: a Ghostty or iTerm2 tab on macOS, otherwise
+in-place. If the session is already showing in a tab, `⏎`, `t` and `w` switch
+to that tab instead of opening a second one; if its tab can't be found any
+more, a new one opens as before.
 `/` filters titles and paths as you type; `f` searches message bodies and runs
 on Enter. `esc` clears a search.
 
@@ -200,10 +204,15 @@ title it wrote never matches the one it reads.
 **Tab titles** are pushed as `<short pwd> · <session title>` through tmux's
 `set-titles`, configured to ignore `pane_title` so agents can't overwrite them.
 
-**New tabs** are opened by sending Ghostty its own `cmd+T` via System Events.
-Ghostty has no CLI action for this on macOS (`+new-window` is Linux-only), so
-this is the only route that lands a tab in the current window instead of
-spawning a detached one. It needs Accessibility permission; without it, use `i`.
+**New tabs** are opened through Ghostty's AppleScript dictionary (Ghostty
+1.3+), which hands back a stable tab id. orbit stores that id on the tmux
+session (`@orbit_tab`), so opening a session that's already on screen switches
+to its tab instead of stacking up another — matching id and current title,
+since Ghostty reuses ids after a close and titles can collide. The same works
+in iTerm2 via its own dictionary. On older Ghostty, orbit falls back to
+sending `cmd+T` via System Events and typing the attach command, which needs
+Accessibility permission and can only find tabs again by title. Without any
+of that, use `i`.
 
 **Notifications** use OSC 9 when a session flips to "needs you" or "your turn".
 

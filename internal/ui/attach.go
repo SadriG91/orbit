@@ -3,10 +3,10 @@ package ui
 import (
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 
 	"github.com/sadrig91/orbit/internal/session"
+	"github.com/sadrig91/orbit/internal/term"
 	"github.com/sadrig91/orbit/internal/tmux"
 )
 
@@ -37,41 +37,29 @@ func isGhostty() bool {
 	return os.Getenv("TERM_PROGRAM") == "ghostty" || os.Getenv("GHOSTTY_RESOURCES_DIR") != ""
 }
 
-// canSpawnTab is macOS-only: it drives Ghostty's own cmd+T through System
-// Events because Ghostty has no CLI action for opening a tab there. On Linux
-// `ghostty +new-window` exists, but it makes a window rather than a tab, so it
-// is handled as the window case instead.
-func canSpawnTab() bool { return runtime.GOOS == "darwin" && isGhostty() }
-
-func canSpawnWindow() bool {
-	if runtime.GOOS == "darwin" {
-		_, err := os.Stat("/Applications/Ghostty.app")
-		return err == nil
-	}
-	_, err := exec.LookPath("ghostty")
-	return err == nil
-}
-
 // resolve turns the requested mode into one this machine can actually do.
 func (m attachMode) resolve() attachMode {
 	switch m {
-	case attachSmart:
-		if canSpawnTab() {
-			return attachTab
-		}
-		return attachInline
-	case attachTab:
-		if canSpawnTab() {
+	case attachSmart, attachTab:
+		if term.CanTab() {
 			return attachTab
 		}
 		return attachInline
 	case attachWindow:
-		if canSpawnWindow() {
+		if term.CanWindow() {
 			return attachWindow
 		}
 		return attachInline
 	}
 	return attachInline
+}
+
+// alreadyOpen reports whether opening this session would duplicate a tab: a
+// client is attached somewhere, and the resolved mode would spawn another
+// one. Inline is exempt — attaching a second client in place just mirrors
+// the session, and asking for it explicitly is a fine way to do that.
+func alreadyOpen(s *session.Session, resolved attachMode) bool {
+	return s.Tmux != nil && s.Tmux.Attached && resolved != attachInline
 }
 
 // attachCommand is the command that puts you inside a session.

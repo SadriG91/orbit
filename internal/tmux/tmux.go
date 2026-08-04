@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +30,7 @@ type Session struct {
 	Created      time.Time
 	Title        string
 	Cwd          string
+	TabID        string // terminal tab last opened for it, or "" — see SetTab
 }
 
 func ConfPath() string { return format.Home(".config", "orbit", "tmux.conf") }
@@ -89,12 +89,13 @@ func output(args ...string) ([]byte, error) {
 }
 
 const listFmt = "#{session_name}\x1f#{@orbit_session}\x1f#{@orbit_agent}\x1f#{session_attached}\x1f" +
-	"#{session_activity}\x1f#{pane_current_command}\x1f#{@orbit_title}\x1f#{session_path}\x1f#{session_created}"
+	"#{session_activity}\x1f#{pane_current_command}\x1f#{@orbit_title}\x1f#{session_path}\x1f#{session_created}\x1f" +
+	"#{@orbit_tab}"
 
 // Field separator, and the number of fields listFmt asks for.
 const (
 	fieldSep   = "\x1f"
-	listFields = 9
+	listFields = 10
 )
 
 // Not every tmux hands the separator back the way it was sent. 3.4 — what
@@ -154,6 +155,7 @@ func parseListLine(line string) (*Session, bool) {
 		AgentRunning: !shells[f[5]],
 		Title:        f[6],
 		Cwd:          f[7],
+		TabID:        f[9],
 	}, true
 }
 
@@ -213,60 +215,17 @@ func Retitle(name, title string) {
 	run("set-option", "-t", name, "@orbit_title", title)
 }
 
-// OpenTab drives Ghostty's own cmd+T through System Events, landing the session
-// as a tab in the current window. Ghostty has no CLI action for this on macOS
-// (+new-window is Linux-only), so this is the only route that doesn't spawn a
-// detached window. Needs Accessibility permission for the terminal.
-func OpenTab(name string) error {
-	attach := attachShellCommand(name)
-	wait := Delay("ORBIT_TAB_DELAY", time.Second).Seconds()
-	script := fmt.Sprintf(`
-tell application "Ghostty" to activate
-Delay 0.35
-tell application "System Events" to tell process "Ghostty"
-	keystroke "t" using command down
-	Delay %.2f
-	keystroke %s
-	key code 36
-end tell`, wait, applescriptString(attach))
-	return exec.Command("osascript", "-e", script).Run()
+// SetTab records the terminal tab a session was opened into, so a later open
+// can switch back to it instead of spawning another. It lives here rather
+// than in orbit's own state because the tmux server is exactly as durable as
+// the sessions it describes: kill the session and the stale id goes with it.
+func SetTab(name, tabID string) {
+	run("set-option", "-t", name, "@orbit_tab", tabID)
 }
 
-// OpenWindow spawns a detached Ghostty window running the session.
-func OpenWindow(name, cwd string) error {
-	if runtime.GOOS == "darwin" {
-		args := append([]string{"-na", "Ghostty.app", "--args", "--working-directory=" + cwd, "-e", "tmux"},
-			Args("attach", "-t", name)...)
-		return exec.Command("open", args...).Run()
-	}
-	args := append([]string{"--working-directory=" + cwd, "-e", "tmux"}, Args("attach", "-t", name)...)
-	return exec.Command("ghostty", args...).Start()
-}
-
-// attachShellCommand is the attach line OpenTab types at Ghostty's shell.
-//
-// Unlike every other call site this one goes through a shell rather than
-// exec, so each argument is quoted: ConfPath() sits under the home directory,
-// and a macOS account named "First Last" would otherwise split the -f path
-// across two argv entries and fail to attach.
-func attachShellCommand(name string) string {
-	args := Args("attach", "-t", name)
-	quoted := make([]string, len(args))
-	for i, a := range args {
-		quoted[i] = shellQuote(a)
-	}
-	return "tmux " + strings.Join(quoted, " ")
-}
-
-// shellQuote wraps s in single quotes, which the shell takes literally. The
-// only character needing care is a single quote itself: close the string,
-// emit an escaped quote, reopen.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func applescriptString(s string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+// AttachArgv is the full command line a terminal runs to show a session.
+func AttachArgv(name string) []string {
+	return append([]string{"tmux"}, Args("attach", "-t", name)...)
 }
 
 //go:embed tmux.conf
