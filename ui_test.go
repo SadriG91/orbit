@@ -38,30 +38,22 @@ func TestViewRenders(t *testing.T) {
 		t.Errorf("expected NeedsApproval first, got %v", got)
 	}
 
-	out := m.View()
+	out := m.render()
 	for _, want := range []string{"╔═╗╦═╗╔╗", "needs you", "your turn", "Refactor batch runner", "work/api-gateway", "attach"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q", want)
 		}
 	}
-	for i, line := range strings.Split(out, "\n") {
-		if n := len([]rune(stripANSI(line))); n > m.w {
-			t.Errorf("line %d is %d cols, wider than %d: %q", i, n, m.w, stripANSI(line))
-		}
-	}
+	assertFrame(t, m, out)
 	t.Log("\n" + out)
 
 	// The full-size banner only appears on a tall, wide terminal.
 	m.w, m.h = 150, 44
-	big := m.View()
+	big := m.render()
 	if !strings.Contains(big, "██████╗") {
 		t.Error("full banner missing at 150x44")
 	}
-	for i, line := range strings.Split(big, "\n") {
-		if n := len([]rune(stripANSI(line))); n > m.w {
-			t.Errorf("big layout line %d is %d cols, wider than %d", i, n, m.w)
-		}
-	}
+	assertFrame(t, m, big)
 	t.Log("\n" + big)
 }
 
@@ -98,6 +90,32 @@ func TestOldUntitledHiddenUntilShowAll(t *testing.T) {
 	m.rebuild()
 	if len(m.view) != 1 {
 		t.Errorf("showAll should reveal it")
+	}
+}
+
+// assertFrame checks the frame fills its terminal exactly and that no row got
+// wrapped. Width alone isn't enough: wrapping makes lines shorter, not wider,
+// so it slips past a max-width check — pin the row content to one line instead.
+func assertFrame(t *testing.T, m *model, frame string) {
+	t.Helper()
+	lines := strings.Split(frame, "\n")
+	for i, line := range lines {
+		if n := len([]rune(stripANSI(line))); n > m.w {
+			t.Errorf("line %d is %d cols, wider than %d: %q", i, n, m.w, stripANSI(line))
+		}
+	}
+	if len(lines) != m.h {
+		t.Errorf("frame is %d rows, want exactly %d", len(lines), m.h)
+	}
+	var joined bool
+	for _, line := range lines {
+		plain := stripANSI(line)
+		if strings.Contains(plain, "Refactor batch runner") && strings.Contains(plain, "needs you") {
+			joined = true
+		}
+	}
+	if !joined {
+		t.Error("session row wrapped: title and state label landed on different lines")
 	}
 }
 

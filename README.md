@@ -44,7 +44,7 @@ brew install tmux
 go install github.com/sadrig91/orbit@latest
 ```
 
-Requires macOS or Linux, Go 1.24+, and tmux. [Ghostty](https://ghostty.org) is
+Requires macOS or Linux, Go 1.25+, and tmux. [Ghostty](https://ghostty.org) is
 optional but gets you tab spawning and desktop notifications.
 
 ## Keys

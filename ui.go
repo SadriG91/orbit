@@ -4,10 +4,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 var (
@@ -100,7 +100,7 @@ func newModel(mode attachMode) *model {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(tea.SetWindowTitle("orbit"), m.scan, tick(), m.spin.Tick)
+	return tea.Batch(m.scan, tick(), m.spin.Tick)
 }
 
 func tick() tea.Cmd {
@@ -271,7 +271,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case readyMsg:
 		return m, m.attach(msg.name, msg.cwd, msg.mode)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.filtering {
 			switch msg.String() {
 			case "esc":
@@ -295,7 +295,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit

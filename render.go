@@ -1,10 +1,13 @@
 package main
 
 import (
+	"image/color"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+
+	"charm.land/lipgloss/v2"
 )
 
 // ANSI Shadow. Rendered with a vertical fade, so it reads as a light source
@@ -24,13 +27,19 @@ var bannerSmall = []string{
 	`╚═╝╩╚═╚═╝╩ ╩ `,
 }
 
-var bannerFade = []lipgloss.Color{"48", "48", "42", "36", "30", "29"}
+var bannerFade = []color.Color{
+	lipgloss.Color("48"), lipgloss.Color("48"), lipgloss.Color("42"),
+	lipgloss.Color("36"), lipgloss.Color("30"), lipgloss.Color("29"),
+}
 
 var (
 	cBorder = lipgloss.Color("238")
 	cSel    = lipgloss.Color("236")
 	cInk    = lipgloss.Color("232")
 
+	// Flat, deliberately. v2's BorderForegroundBlend distributes a gradient
+	// around the whole ring, which on a three-sided box (the top edge is drawn
+	// by hand for the label) lands grey on one side and green on the other.
 	paneStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(cBorder).
@@ -44,7 +53,7 @@ var (
 
 // pill is a filled badge — the counts need to read at a glance from across the
 // room, which plain coloured text doesn't do.
-func pill(icon, text string, bg lipgloss.Color) string {
+func pill(icon, text string, bg color.Color) string {
 	return lipgloss.NewStyle().Foreground(cInk).Background(bg).Bold(true).
 		Padding(0, 1).Render(icon + " " + text)
 }
@@ -68,7 +77,7 @@ func banner(width, height int) []string {
 	return out
 }
 
-func (m *model) View() string {
+func (m *model) render() string {
 	if m.w == 0 {
 		return "starting orbit…"
 	}
@@ -80,8 +89,9 @@ func (m *model) View() string {
 		bodyH = 5
 	}
 
-	// lipgloss Width() covers content+padding; the border adds 2 more on top.
-	// So a box of total width W takes Width(W-2) and holds W-4 of content.
+	// In lipgloss v2 Width() is the *total* rendered width, border included
+	// (v1 counted content+padding only). A box of width W therefore takes
+	// Width(W) and holds W-4 of content: 2 border columns, 2 of padding.
 	const chrome = 4
 	listBoxW := min(66, max(38, m.w*46/100))
 	detBoxW := m.w - listBoxW - 1 // one column of air between the panes
@@ -108,6 +118,33 @@ func (m *model) View() string {
 	return head + "\n" + body + "\n" + foot
 }
 
+// View wraps the rendered frame in the declarative surface Bubble Tea v2 wants:
+// alt screen, window title, and a terminal-level progress indicator. Ghostty
+// paints that indicator on the tab itself, so a session wanting attention is
+// visible even when orbit's tab isn't the one you're looking at.
+func (m *model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.WindowTitle = "orbit"
+
+	var needs, working int
+	for _, s := range m.all {
+		switch s.State {
+		case NeedsApproval, YourTurn:
+			needs++
+		case Working:
+			working++
+		}
+	}
+	switch {
+	case needs > 0:
+		v.ProgressBar = &tea.ProgressBar{State: tea.ProgressBarWarning, Value: 100}
+	case working > 0:
+		v.ProgressBar = &tea.ProgressBar{State: tea.ProgressBarIndeterminate}
+	}
+	return v
+}
+
 // titledPane draws the pane label into the top border rule, the way most
 // modern TUIs do it — lipgloss v1 has no border titles, so the top edge is
 // drawn by hand and the box below it renders without one.
@@ -117,7 +154,7 @@ func titledPane(title string, lines []string, w, h int) string {
 	dashes := max(0, w-3-lipgloss.Width(label))
 	top := border.Render("╭─") + paneLabel.Render(label) + border.Render(strings.Repeat("─", dashes)+"╮")
 
-	box := paneStyle.BorderTop(false).Width(w - 2).Height(h - 2).Render(strings.Join(lines, "\n"))
+	box := paneStyle.BorderTop(false).Width(w).Height(h - 1).Render(strings.Join(lines, "\n"))
 	return top + "\n" + box
 }
 
@@ -306,7 +343,7 @@ func (m *model) detail(w, h int) []string {
 	return out
 }
 
-func stateColor(s State) lipgloss.Color {
+func stateColor(s State) color.Color {
 	switch s {
 	case Working:
 		return cBright

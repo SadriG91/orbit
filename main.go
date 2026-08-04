@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 //go:embed tmux.conf
@@ -60,7 +60,7 @@ func main() {
 	m.notify = NewNotifier(!*noNotify)
 	defer m.notify.Close()
 
-	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "orbit:", err)
 		os.Exit(1)
 	}
