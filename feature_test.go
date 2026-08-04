@@ -125,3 +125,49 @@ func TestSummaryCacheKeyTracksSessionState(t *testing.T) {
 		t.Error("different agents must not share a cache entry")
 	}
 }
+
+// The provider CLIs report no progress, so the bar is elapsed-vs-estimate. It
+// must never reach full while still working — a bar sitting at 100% reads as a
+// hang — and the estimate must adapt rather than stay a hardcoded guess.
+func TestSummaryProgressStaysHonest(t *testing.T) {
+	m := newModel(testConfig(), attachInline)
+	m.pending["x"] = time.Now().Add(-2 * time.Second)
+	pct, elapsed, running := m.summaryProgress("x")
+	if !running || elapsed < time.Second {
+		t.Fatalf("expected a running job, got running=%v elapsed=%v", running, elapsed)
+	}
+	if pct <= 0 || pct >= 1 {
+		t.Errorf("progress %.2f out of range", pct)
+	}
+
+	// Far past the estimate it must still be short of full.
+	m.pending["x"] = time.Now().Add(-10 * time.Minute)
+	if pct, _, _ := m.summaryProgress("x"); pct > 0.95 {
+		t.Errorf("overrunning job showed %.2f, must cap below full", pct)
+	}
+	if _, _, running := m.summaryProgress("nosuch"); running {
+		t.Error("reported progress for a job that isn't running")
+	}
+}
+
+// Cheap models have the smallest context windows, so the excerpt budget is the
+// setting that keeps a huge session from overflowing one.
+func TestSummaryInputBudgetIsPerProvider(t *testing.T) {
+	cfg, _ := LoadConfigDefaults()
+	for _, a := range AllAgents {
+		if got := cfg.Summary.InputBudget(a); got < 1000 || got > 200_000 {
+			t.Errorf("%s: budget %d is not a sane default", a, got)
+		}
+	}
+	cfg.Summary.Codex.MaxInputChars = 4000
+	if got := cfg.Summary.InputBudget(Codex); got != 4000 {
+		t.Errorf("per-provider override ignored: got %d", got)
+	}
+	if cfg.Summary.InputBudget(Claude) == 4000 {
+		t.Error("a codex override must not affect claude")
+	}
+	var empty Summary
+	if got := empty.InputBudget(Claude); got <= 0 {
+		t.Error("an unset budget must still resolve to something usable")
+	}
+}

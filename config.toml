@@ -33,7 +33,16 @@ enabled = true
 # Off by default: it spends tokens as you browse.
 auto = false
 
+# Cap on the summary text itself.
 max_chars = 420
+
+# Cap on what gets *sent*. Summarising runs on cheap models, and cheap models
+# have the smallest context windows — so the excerpt is deliberately a thin
+# slice (the opening of the conversation plus its tail, skipping the bulky tool
+# output in the middle) rather than the whole transcript. Roughly 4 chars per
+# token: 12000 is about 3k tokens, which fits anything. Raise it per provider
+# below if you point one at a bigger model.
+max_input_chars = 12000
 
 # One command per provider, so each summary is billed to that agent's own
 # subscription and no API keys are needed. The transcript excerpt arrives on
@@ -41,6 +50,7 @@ max_chars = 420
 # each provider offers — this is a summarising job, not a reasoning one.
 [summary.claude]
 command = ["claude", "-p", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
+# max_input_chars = 24000
 
 [summary.codex]
 command = ["codex", "exec", "--model", "gpt-5-mini", "--sandbox", "read-only", "--skip-git-repo-check"]

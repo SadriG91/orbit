@@ -144,6 +144,8 @@ func (m *model) View() tea.View {
 		}
 	}
 	switch {
+	case len(m.pending) > 0:
+		v.ProgressBar = &tea.ProgressBar{State: tea.ProgressBarIndeterminate}
 	case needs > 0:
 		v.ProgressBar = &tea.ProgressBar{State: tea.ProgressBarWarning, Value: 100}
 	case working > 0:
@@ -192,6 +194,9 @@ func (m *model) header() string {
 	}
 	if shell > 0 {
 		pills = append(pills, pill("○", itoa(shell)+" idle", cGreen))
+	}
+	if n := len(m.pending); n > 0 {
+		pills = append(pills, pill("◍", itoa(n)+" summarising", lipgloss.Color("101")))
 	}
 	if len(pills) == 0 {
 		pills = append(pills, lipgloss.NewStyle().Foreground(cDim).
@@ -367,9 +372,12 @@ func (m *model) detail(w, h int) []string {
 			add("  " + sName.Render(l))
 		}
 		add("")
-	} else if m.pending[s.ID] {
+	} else if pct, elapsed, running := m.summaryProgress(s.ID); running {
 		add(paneLabel.Render("▸ summary"))
-		add("  " + sDim.Render(m.spin.View()+" generating with "+s.Agent.String()+"…"))
+		m.prog.SetWidth(max(10, min(w-2, 44)))
+		add("  " + m.prog.ViewAs(pct))
+		add("  " + sDim.Render(m.spin.View()+" "+s.Agent.String()+" · "+
+			itoa(int(elapsed.Seconds()))+"s of ~"+itoa(int(m.summaryE.Seconds()))+"s"))
 		add("")
 	} else if m.cfg.Summary.Enabled {
 		add(sDim.Render("press s to summarise this session"), "")

@@ -60,7 +60,7 @@ func GenerateSummary(s *Session, cfg Summary) (string, error) {
 	if len(argv) == 0 {
 		return "", errNoCommand
 	}
-	excerpt, err := transcriptExcerpt(s)
+	excerpt, err := transcriptExcerpt(s, cfg.InputBudget(s.Agent))
 	if err != nil {
 		return "", err
 	}
@@ -101,12 +101,14 @@ const (
 // transcriptExcerpt builds the prompt input: the opening of the conversation
 // plus its tail. The middle is where tool output lives, which is bulky and
 // tells you least about intent.
-func transcriptExcerpt(s *Session) (string, error) {
+func transcriptExcerpt(s *Session, maxChars int) (string, error) {
 	const (
 		headLines = 12
 		tailLines = 40
-		maxChars  = 12000
 	)
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
 	if s.Path == "" {
 		// Copilot: no transcript file, so use what the database gave us.
 		return "Title: " + s.Title + "\nLast prompt: " + s.Last, nil
@@ -144,7 +146,10 @@ func transcriptExcerpt(s *Session) (string, error) {
 	}
 	out := strings.Join(parts, "\n")
 	if len(out) > maxChars {
-		out = out[:maxChars]
+		// Keep both ends: the opening says what the session was for, the tail
+		// says how it went. Cutting only the front would lose the intent.
+		half := maxChars / 2
+		out = out[:half] + "\n[...]\n" + out[len(out)-half:]
 	}
 	if strings.TrimSpace(out) == "" {
 		return "", errEmptySummary

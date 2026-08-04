@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -104,10 +105,12 @@ type model struct {
 	group       bool
 
 	searching bool
-	query     string            // the committed full-text query
-	matches   map[string]Match  // session id -> where it matched
-	summaries map[string]string // session id -> cached or generated summary
-	pending   map[string]bool   // summaries currently being generated
+	query     string               // the committed full-text query
+	matches   map[string]Match     // session id -> where it matched
+	summaries map[string]string    // session id -> cached or generated summary
+	pending   map[string]time.Time // summaries in flight -> when they started
+	prog      progress.Model
+	summaryE  time.Duration // rolling estimate of how long a summary takes
 	notify    *Notifier
 }
 
@@ -121,7 +124,9 @@ func newModel(cfg Config, mode attachMode) *model {
 	return &model{
 		ix: NewIndex(), filter: ti, spin: sp, mode: mode,
 		cfg: cfg, icons: cfg.iconMode(), sort: cfg.sortMode(), group: cfg.Group,
-		summaries: map[string]string{}, pending: map[string]bool{},
+		summaries: map[string]string{}, pending: map[string]time.Time{},
+		prog:     progress.New(progress.WithColors(lipgloss.Color("#1f8a54"), lipgloss.Color("#00ff87")), progress.WithoutPercentage()),
+		summaryE: 12 * time.Second, // seeded from observation; adapts as it runs
 	}
 }
 
@@ -261,13 +266,13 @@ func (m *model) summarise(s *Session) tea.Cmd {
 	if _, have := m.summaries[s.ID]; have {
 		return nil
 	}
-	if m.pending[s.ID] {
+	if _, running := m.pending[s.ID]; running {
 		return nil
 	}
-	m.pending[s.ID] = true
+	m.pending[s.ID] = time.Now()
 	m.say("summarising with " + s.Agent.String() + "…")
 	cfg, sess := m.cfg.Summary, s
-	return func() tea.Msg {
+	gen := func() tea.Msg {
 		text, err := GenerateSummary(sess, cfg)
 		out := summaryMsg{id: sess.ID, text: text}
 		if err != nil {
@@ -275,6 +280,20 @@ func (m *model) summarise(s *Session) tea.Cmd {
 		}
 		return out
 	}
+	return tea.Batch(gen, m.spin.Tick) // make sure the bar animates
+}
+
+// summaryProgress estimates how far along a generation is. The provider CLIs
+// report nothing, so this is elapsed time against a rolling estimate, capped
+// short of full — a bar that sits at 100% while still working reads as hung.
+func (m *model) summaryProgress(id string) (float64, time.Duration, bool) {
+	started, ok := m.pending[id]
+	if !ok {
+		return 0, 0, false
+	}
+	elapsed := time.Since(started)
+	pct := float64(elapsed) / float64(max(m.summaryE, time.Second))
+	return min(pct, 0.95), elapsed, true
 }
 
 func (m *model) anyWorking() bool {
@@ -323,6 +342,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case summaryMsg:
+		// Let the estimate track reality, so the bar is honest on this machine
+		// with these models rather than to a hardcoded guess.
+		if started, ok := m.pending[msg.id]; ok && msg.err == "" {
+			took := time.Since(started)
+			m.summaryE = (m.summaryE*3 + took) / 4
+		}
 		delete(m.pending, msg.id)
 		if msg.err != "" {
 			m.say("summary failed: " + msg.err)
@@ -361,10 +386,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		// Only keep animating while something is actually working, so an idle
 		// dashboard costs nothing.
-		for _, s := range m.all {
-			if s.State == Working {
-				return m, cmd
-			}
+		if len(m.pending) > 0 || m.anyWorking() {
+			return m, cmd
 		}
 		return m, nil
 

@@ -26,26 +26,44 @@ type Config struct {
 }
 
 type Summary struct {
-	Enabled  bool     `toml:"enabled"`
-	Auto     bool     `toml:"auto"`
-	MaxChars int      `toml:"max_chars"`
-	Claude   Provider `toml:"claude"`
-	Codex    Provider `toml:"codex"`
-	Copilot  Provider `toml:"copilot"`
+	Enabled       bool     `toml:"enabled"`
+	Auto          bool     `toml:"auto"`
+	MaxChars      int      `toml:"max_chars"`
+	MaxInputChars int      `toml:"max_input_chars"`
+	Claude        Provider `toml:"claude"`
+	Codex         Provider `toml:"codex"`
+	Copilot       Provider `toml:"copilot"`
 }
 
 type Provider struct {
-	Command []string `toml:"command"`
+	Command       []string `toml:"command"`
+	MaxInputChars int      `toml:"max_input_chars"`
 }
 
-func (s Summary) For(a Agent) []string {
+func (s Summary) provider(a Agent) Provider {
 	switch a {
 	case Codex:
-		return s.Codex.Command
+		return s.Codex
 	case Copilot:
-		return s.Copilot.Command
+		return s.Copilot
 	}
-	return s.Claude.Command
+	return s.Claude
+}
+
+func (s Summary) For(a Agent) []string { return s.provider(a).Command }
+
+// InputBudget is how much transcript may be sent. Summarising deliberately runs
+// on cheap models, whose context windows are the smallest, so this is the
+// setting that keeps a huge session from blowing the window — per provider,
+// because one of them may be pointed at a larger model.
+func (s Summary) InputBudget(a Agent) int {
+	if n := s.provider(a).MaxInputChars; n > 0 {
+		return n
+	}
+	if s.MaxInputChars > 0 {
+		return s.MaxInputChars
+	}
+	return 12000
 }
 
 func configPath() string { return home(".config", "orbit", "config.toml") }

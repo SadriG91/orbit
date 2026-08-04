@@ -93,6 +93,18 @@ summarising job rather than a reasoning one:
 command = ["claude", "-p", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
 ```
 
+Generation takes around ten seconds, so it runs in the background behind a
+progress bar. The providers report no progress of their own, so the bar is
+elapsed time against a rolling estimate that adapts to your machine and models,
+capped short of full — a bar sitting at 100% while still working reads as a
+hang. Ghostty also gets a native progress indicator on the tab.
+
+Because summarising deliberately uses cheap models, and cheap models have the
+smallest context windows, only a thin slice of the transcript is sent: the
+opening of the conversation plus its tail, skipping the bulky tool output in
+the middle. `max_input_chars` caps it (12000 ≈ 3k tokens), overridable per
+provider if you point one at a bigger model.
+
 Set `auto = true` under `[summary]` to summarise whatever you're sitting on
 without pressing `s`. It's off by default because it spends tokens as you browse.
 
