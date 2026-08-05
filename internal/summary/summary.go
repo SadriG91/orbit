@@ -118,9 +118,19 @@ func Generate(s *session.Session, cfg config.Summary) (Record, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
+	// A directory of orbit's own, not s.Cwd. These CLIs treat their working
+	// directory as a workspace and record the run as a session in it, so
+	// summarising a session used to leave a phantom conversation sitting in
+	// that project — see session.ScratchDir. They still need to start
+	// somewhere, hence a real directory rather than none.
+	dir := session.ScratchDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return Record{}, err
+	}
+
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Dir = s.Cwd // some CLIs refuse to start outside a workspace
+	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
 		return Record{}, err

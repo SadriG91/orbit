@@ -97,3 +97,44 @@ func TestSortModesOrderCorrectly(t *testing.T) {
 		t.Errorf("a session needing attention must stay pinned to the top")
 	}
 }
+
+// Summarising runs an agent CLI, and those CLIs record the run as a session in
+// their working directory. orbit gives them a directory of its own so those
+// phantom conversations don't land in a real project — and they must not reach
+// the dashboard either, or you can summarise a summary.
+func TestScanDropsOrbitsOwnSessions(t *testing.T) {
+	real1 := &Session{ID: "a", Cwd: "/home/u/work/api", Title: "Refactor the runner"}
+	phantom := &Session{ID: "b", Cwd: ScratchDir(), Title: "8;45;51hhello"}
+	real2 := &Session{ID: "c", Cwd: "/home/u/work/docs", Title: "Fix the changelog"}
+
+	got := snapshot([]*Session{real1, phantom, real2})
+
+	if len(got) != 2 {
+		t.Fatalf("snapshot kept %d sessions, want 2", len(got))
+	}
+	for _, s := range got {
+		if s.Cwd == ScratchDir() {
+			t.Errorf("a session from orbit's scratch directory reached the dashboard: %+v", s)
+		}
+	}
+	if got[0].ID != "a" || got[1].ID != "c" {
+		t.Errorf("kept %q and %q, want a and c", got[0].ID, got[1].ID)
+	}
+}
+
+// The copies are what let the UI write Tmux and State onto what it got while
+// the next scan is already running.
+func TestSnapshotCopies(t *testing.T) {
+	orig := &Session{ID: "a", Cwd: "/home/u/work/api"}
+	got := snapshot([]*Session{orig})
+	if len(got) != 1 {
+		t.Fatalf("snapshot returned %d sessions", len(got))
+	}
+	if got[0] == orig {
+		t.Error("snapshot handed back the cached value instead of a copy")
+	}
+	got[0].State = NeedsApproval
+	if orig.State == NeedsApproval {
+		t.Error("writing to the snapshot mutated the cached session")
+	}
+}
