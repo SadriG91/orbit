@@ -421,6 +421,35 @@ func waitForPaneCmd(p *pane.Pane) tea.Cmd {
 	}
 }
 
+// saveSort and saveGroup keep what `o` and `p` did.
+//
+// These two are the only settings you can change from the keyboard, and until
+// now the change was thrown away on quit — you found the arrangement you
+// wanted in the UI and then had to reproduce it by editing a file. The value
+// is captured rather than read inside the command, because by the time it runs
+// the cursor may well have moved on.
+func (m *Model) saveSort() tea.Cmd {
+	mode := m.sort.String()
+	return save("sort order", func() error { return config.SetString("", "sort", mode) })
+}
+
+func (m *Model) saveGroup() tea.Cmd {
+	on := m.group
+	return save("grouping", func() error { return config.SetBool("", "group", on) })
+}
+
+// save runs a config write off the UI goroutine. A failure is worth saying —
+// silently not keeping a preference is how you learn to distrust the feature —
+// but it is never worth refusing the keypress over.
+func save(what string, write func() error) tea.Cmd {
+	return func() tea.Msg {
+		if err := write(); err != nil {
+			return statusMsg("could not save " + what + ": " + err.Error())
+		}
+		return nil
+	}
+}
+
 func (m *Model) sel() *session.Session {
 	if m.cursor < 0 || m.cursor >= len(m.view) {
 		return nil
@@ -888,7 +917,7 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		session.SortSessionsBy(m.all, m.sort)
 		m.rebuild()
 		m.say("sorted by " + m.sort.String())
-		return m, nil
+		return m, m.saveSort()
 	case "p":
 		m.group = !m.group
 		if m.group {
@@ -896,7 +925,7 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			session.SortSessionsBy(m.all, m.sort)
 			m.rebuild()
 		}
-		return m, nil
+		return m, tea.Batch(m.saveGroup(), m.saveSort())
 	case "s":
 		if sel := m.sel(); sel != nil {
 			return m, m.summarise(sel)

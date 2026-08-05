@@ -52,31 +52,38 @@ func Sync() (added, removed []string, err error) {
 		return nil, nil, nil // untouched, so the file keeps its mtime
 	}
 
+	if err := writeAtomic(path, merged); err != nil {
+		return nil, nil, err
+	}
+	return added, removed, nil
+}
+
+// writeAtomic replaces the config, keeping its mode.
+//
+// Written beside the original and renamed over it: a config half-written by an
+// interrupted start is one orbit would refuse to parse next time, and refusing
+// to parse it is how every setting silently reverts to its default.
+func writeAtomic(path, content string) error {
 	mode := os.FileMode(0o644)
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	// Written beside the original and renamed over it: a config half-written
-	// by an interrupted start is one orbit would refuse to parse next time.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.toml")
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(merged); err != nil {
+	if _, err := tmp.WriteString(content); err != nil {
 		tmp.Close()
-		return nil, nil, err
+		return err
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, nil, err
+		return err
 	}
 	if err := os.Chmod(tmp.Name(), mode); err != nil {
-		return nil, nil, err
+		return err
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return nil, nil, err
-	}
-	return added, removed, nil
+	return os.Rename(tmp.Name(), path)
 }
 
 // A region is a table and the lines that belong to it: the top-level one,
