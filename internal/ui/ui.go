@@ -352,7 +352,32 @@ func scan(gen int, ix *session.Index) tea.Msg {
 	for _, s := range sessions {
 		s.Resolve(now)
 	}
+	promoteWaiting(sessions)
 	return scanMsg{gen: gen, sessions: sessions}
+}
+
+// promoteWaiting flags sessions whose pane is visibly asking a question.
+//
+// No agent records a permission prompt. Claude writes the tool call and then
+// nothing at all until you answer, so the only signal in the transcript is a
+// tool call that stopped advancing — and telling that apart from a slow tool
+// needs seconds of stillness. Twelve of them, which is a long time to leave
+// someone waiting when the question is already on the screen.
+//
+// So the screen is asked. Only for sessions actually in that ambiguous state,
+// which in practice is nought or one, at about 9ms each — nothing next to the
+// scan that just read every transcript. Everything else keeps waiting the way
+// it always did, and a prompt this fails to recognise still gets picked up by
+// the stillness rule a few seconds later.
+func promoteWaiting(sessions []*session.Session) {
+	for _, s := range sessions {
+		if s.State != session.Working || !s.AwaitingTool() || s.Tmux == nil {
+			continue
+		}
+		if session.LooksLikeApprovalPrompt(tmux.Capture(s.Tmux.Name, 40)) {
+			s.PromoteToApproval()
+		}
+	}
 }
 
 // capture refreshes the preview for whatever is selected.
