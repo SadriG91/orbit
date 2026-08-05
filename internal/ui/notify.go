@@ -45,7 +45,7 @@ func (n *Notifier) Update(sessions []*session.Session) {
 		}
 		switch s.State {
 		case session.NeedsApproval:
-			n.post(s.Agent.String() + " needs approval — " + s.ShortCwd() + ": " + s.Name())
+			n.post(s.Agent.String() + " needs attention — " + s.ShortCwd() + ": " + s.Name())
 		case session.YourTurn:
 			n.post(s.Agent.String() + " finished — " + s.ShortCwd() + ": " + s.Name())
 		}

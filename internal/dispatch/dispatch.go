@@ -156,7 +156,7 @@ func Active() map[string]*Record {
 
 // Forget drops the records for a session. Called when orbit is about to resume
 // one interactively: the dispatch is over the moment a person takes it over,
-// and a record left saying "needs you" would keep the triangle on a session
+// and a record left saying "needs attention" would keep the triangle on a session
 // being actively typed into.
 func Forget(agent, sessionID string) {
 	if sessionID == "" {

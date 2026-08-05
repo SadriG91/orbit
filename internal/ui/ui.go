@@ -69,6 +69,79 @@ func agentStyle(a session.Agent) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("173"))
 }
 
+type groupMode int
+
+const (
+	groupNone groupMode = iota
+	groupProject
+	groupAgent
+)
+
+func parseGroupMode(enabled bool, name string) groupMode {
+	if !enabled {
+		return groupNone
+	}
+	if strings.EqualFold(name, "agent") {
+		return groupAgent
+	}
+	return groupProject
+}
+
+func (g groupMode) String() string {
+	switch g {
+	case groupProject:
+		return "project"
+	case groupAgent:
+		return "agent"
+	}
+	return "none"
+}
+
+func (g groupMode) next() groupMode {
+	return (g + 1) % 3
+}
+
+func groupKey(s *session.Session, mode groupMode) string {
+	switch mode {
+	case groupProject:
+		return s.Cwd
+	case groupAgent:
+		return s.Agent.String()
+	}
+	return ""
+}
+
+// groupSessions makes each section contiguous without throwing away the active
+// sort. The first session a sort surfaces decides where its group lands, and
+// the remaining sessions keep that same ordering inside the section. A project
+// needing attention therefore stays near the top without splitting into a
+// second, repeated heading when its dormant sessions appear later.
+func groupSessions(ss []*session.Session, mode groupMode) []*session.Session {
+	if mode == groupNone || len(ss) < 2 {
+		return ss
+	}
+	type bucket struct {
+		items []*session.Session
+	}
+	var groups []*bucket
+	byKey := make(map[string]*bucket)
+	for _, s := range ss {
+		key := groupKey(s, mode)
+		b := byKey[key]
+		if b == nil {
+			b = &bucket{}
+			byKey[key] = b
+			groups = append(groups, b)
+		}
+		b.items = append(b.items, s)
+	}
+	out := make([]*session.Session, 0, len(ss))
+	for _, b := range groups {
+		out = append(out, b.items...)
+	}
+	return out
+}
+
 type (
 	tickMsg time.Time
 	scanMsg struct {
@@ -83,6 +156,9 @@ type (
 		err string
 	}
 	paneDirtyMsg struct{}
+	// paneSnapshotMsg restores the cached detail preview when navigation
+	// returns to the session the stream was already watching.
+	paneSnapshotMsg struct{ name string }
 	// paneGoneMsg says the control client has ended and will send nothing more.
 	paneGoneMsg struct{}
 	statusMsg   string
@@ -108,6 +184,25 @@ type (
 		name, cwd string
 		mode      attachMode
 	}
+	// startedMsg is a fresh interactive agent waiting inside tmux. Unlike a
+	// resumed session, a new one stays in Orbit and focuses its live pane
+	// instead of immediately taking over another terminal.
+	startedMsg struct {
+		name, cwd string
+		agent     session.Agent
+	}
+	startFailedMsg struct{ err string }
+	// driveReadyMsg is a dormant transcript resumed by Tab. It becomes a live
+	// row and receives pane focus, but never attaches an external terminal.
+	driveReadyMsg struct {
+		name, cwd, id, title string
+		agent                session.Agent
+	}
+	driveFailedMsg struct{ id, err string }
+	paneReadyMsg   struct {
+		name, err string
+	}
+	paneInputDoneMsg struct{ err string }
 )
 
 type Model struct {
@@ -118,18 +213,22 @@ type Model struct {
 	top    int
 	w, h   int
 
-	filter    textinput.Model
-	spin      spinner.Model
-	filtering bool
-	showAll   bool
+	filter      textinput.Model
+	dispatchDir textinput.Model
+	spin        spinner.Model
+	filtering   bool
+	showAll     bool
+	showHelp    bool
 
 	// The dispatch prompt. Target is captured when `d` is pressed rather than
 	// read back when Enter is: a scan landing mid-typing re-sorts the list and
 	// moves the cursor, and the task you were writing belongs to the session
 	// you were looking at when you started writing it.
-	dispatching  bool
-	dispatchTo   session.Agent
-	dispatchInto string
+	dispatching        bool
+	dispatchTo         session.Agent
+	dispatchInto       string
+	dispatchDirFocused bool
+	dispatchDirCursor  int
 
 	preview     string
 	previewName string
@@ -143,6 +242,26 @@ type Model struct {
 	streamOff     bool
 	streamOpening bool
 
+	// embedded is the tmux session mounted in the dashboard's right pane;
+	// terminalFocused says whether that mounted pane owns input. Keeping these
+	// separate lets Tab return to Sessions without replacing the terminal with
+	// a lossy, truncated detail preview.
+	embedded        string
+	embeddedCwd     string
+	embeddedName    string
+	terminalFocused bool
+	terminalZoom    bool
+	terminalWide    bool
+	inputQueue      []paneInput
+	inputSending    bool
+	terminalW       int
+	terminalH       int
+
+	// preparing is the dormant transcript currently being resumed for the
+	// live pane. It is visible in the row, detail pane, and footer until tmux
+	// is ready or the resume fails.
+	preparing *drivePreparation
+
 	status      string
 	statusUntil time.Time
 	mode        attachMode
@@ -150,7 +269,7 @@ type Model struct {
 	logosSent   bool
 	cfg         config.Config
 	sort        session.SortMode
-	group       bool
+	group       groupMode
 
 	scanning  bool      // a scan is in flight; see scanCmd
 	rescan    bool      // an explicit refresh arrived mid-scan and owes us another
@@ -186,11 +305,14 @@ func New(cfg config.Config, attachOverride, version string) *Model {
 	ti.Prompt = "/"
 	ti.Placeholder = "filter"
 	ti.CharLimit = 80
+	dir := textinput.New()
+	dir.Placeholder = "directory"
+	dir.CharLimit = 4096
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(cBright)
 	return &Model{
-		ix: session.NewIndex(), filter: ti, spin: sp, mode: mode, version: version,
-		cfg: cfg, icons: ResolveIconMode(cfg.IconMode()), sort: session.ParseSortMode(cfg.Sort), group: cfg.Group,
+		ix: session.NewIndex(), filter: ti, dispatchDir: dir, spin: sp, mode: mode, version: version,
+		cfg: cfg, icons: ResolveIconMode(cfg.IconMode()), sort: session.ParseSortMode(cfg.Sort), group: parseGroupMode(cfg.Group, cfg.GroupBy),
 		summaries: map[string]summary.Record{}, pending: map[string]time.Time{},
 		notify:   NewNotifier(cfg.Notify),
 		prog:     progress.New(progress.WithColors(lipgloss.Color("#1f8a54"), lipgloss.Color("#00ff87")), progress.WithoutPercentage()),
@@ -362,23 +484,17 @@ func scan(gen int, ix *session.Index) tea.Msg {
 		}
 	}
 	for _, t := range unlinked {
-		var best *session.Session
-		for _, s := range sessions {
-			if claimed[s.ID] || s.Agent.String() != t.Agent || s.Cwd != t.Cwd {
-				continue
-			}
-			if s.Modified.Before(t.Created) {
-				continue // predates the tmux session, so it isn't the one it started
-			}
-			if best == nil || s.Modified.After(best.Modified) {
-				best = s
-			}
-		}
+		best := unlinkedCandidate(t, sessions, claimed)
 		if best != nil {
 			best.Tmux = t
 			claimed[best.ID] = true
 			tmux.Link(t.Name, best.ID)
 			tmux.Retitle(t.Name, best.TabTitle())
+		} else if pending := pendingFromTmux(t); pending != nil {
+			// A freshly started agent has no transcript until its first prompt.
+			// The tmux session is still real and controllable, so keep it in the
+			// dashboard rather than making it disappear during that gap.
+			sessions = append(sessions, pending)
 		}
 	}
 
@@ -397,11 +513,17 @@ func scan(gen int, ix *session.Index) tea.Msg {
 // matters — control mode needs a pty and a tmux that cooperates, and neither
 // is worth making the dashboard conditional on.
 func (m *Model) capture() tea.Cmd {
-	s := m.sel()
-	if s == nil || s.Tmux == nil {
+	name := m.embedded
+	if name == "" {
+		s := m.sel()
+		if s == nil || s.Tmux == nil {
+			return func() tea.Msg { return previewMsg{} }
+		}
+		name = s.Tmux.Name
+	}
+	if name == "" {
 		return func() tea.Msg { return previewMsg{} }
 	}
-	name := s.Tmux.Name
 
 	switch {
 	case m.stream != nil:
@@ -437,13 +559,20 @@ func (m *Model) openStreamCmd(name string) tea.Cmd {
 func (m *Model) followCmd(name string) tea.Cmd {
 	p := m.stream
 	if p.Session() == name {
-		return nil // already watching it; the stream will say when it changes
+		// The cache may have been cleared while the cursor visited a dormant
+		// session. An idle pane emits no Dirty event, so waiting for output here
+		// would leave its preview blank indefinitely.
+		return func() tea.Msg { return paneSnapshotMsg{name: name} }
 	}
 	return func() tea.Msg {
 		if err := p.Switch(name); err != nil {
 			return statusMsg("preview: " + err.Error())
 		}
-		return paneDirtyMsg{}
+		// Switching marks the Pane dirty, so the one existing wait chain will
+		// re-arm itself. This command only publishes the freshly seeded screen;
+		// returning paneDirtyMsg here would create a second permanent waiter on
+		// every cursor movement.
+		return paneSnapshotMsg{name: name}
 	}
 }
 
@@ -455,7 +584,14 @@ func (m *Model) followCmd(name string) tea.Cmd {
 type livePane interface {
 	Session() string
 	Text() string
+	Render() string
 	Switch(string) error
+	Resize(int, int) error
+	SendKeyTo(string, string) error
+	SendTextTo(string, string) error
+	SendWheelTo(string, int, int, pane.WheelDirection) error
+	Scrolled() bool
+	FollowTail()
 	Dirty() <-chan struct{}
 	Done() <-chan struct{}
 	Close() error
@@ -494,8 +630,18 @@ func (m *Model) saveSort() tea.Cmd {
 }
 
 func (m *Model) saveGroup() tea.Cmd {
-	on := m.group
-	return save("grouping", func() error { return config.SetBool("", "group", on) })
+	mode := m.group
+	return save("grouping", func() error {
+		if err := config.SetBool("", "group", mode != groupNone); err != nil {
+			return err
+		}
+		// Keep the last concrete mode even while grouping is off, so the two
+		// settings remain meaningful when edited directly as well as by `p`.
+		if mode != groupNone {
+			return config.SetString("", "group_by", mode.String())
+		}
+		return nil
+	})
 }
 
 // save runs a config write off the UI goroutine. A failure is worth saying —
@@ -512,13 +658,16 @@ func save(what string, write func() error) tea.Cmd {
 
 // resetPrompt puts the shared text input back to being the quick filter.
 //
-// One textinput serves three prompts — filter, full-text search, dispatch —
-// and each sets its own prompt string, placeholder and length limit. Undoing
+// The task textinput is shared by the quick filter, full-text search and
+// dispatch composer. Each sets its own prompt, placeholder and length limit. Undoing
 // that in one place is what stops the next `/` inheriting the last dispatch's
 // 4000-character budget and the word "task" as its placeholder.
 func (m *Model) resetPrompt() {
 	m.searching = false
 	m.dispatching = false
+	m.dispatchDirFocused = false
+	m.dispatchDirCursor = -1
+	m.dispatchDir.Blur()
 	m.filter.Prompt = "/"
 	m.filter.Placeholder = "filter"
 	m.filter.CharLimit = 80
@@ -558,6 +707,7 @@ func (m *Model) rebuild() {
 		}
 		m.view = append(m.view, s)
 	}
+	m.view = groupSessions(m.view, m.group)
 	// Keep the cursor on the same session across refreshes and re-sorts.
 	if keep != nil {
 		for i, s := range m.view {
@@ -584,7 +734,7 @@ const maxSummaryJobs = 2
 // turn is in flight — the transcript is still being written, and whatever it
 // says right now is about to change.
 func (m *Model) shouldAutoSummarise(s *session.Session) bool {
-	if !m.cfg.Summary.Enabled || !m.cfg.Summary.Auto {
+	if pendingSession(s) || !m.cfg.Summary.Enabled || !m.cfg.Summary.Auto {
 		return false
 	}
 	if s.State == session.Working || s.State == session.NeedsApproval {
@@ -693,6 +843,10 @@ func (m *Model) pump() tea.Cmd {
 // summarise kicks off a provider CLI in the background. It takes seconds, so
 // the UI stays responsive and the result arrives as a message.
 func (m *Model) summarise(s *session.Session) tea.Cmd {
+	if pendingSession(s) {
+		m.say("send the first prompt before summarising this session")
+		return nil
+	}
 	if !m.cfg.Summary.Enabled {
 		return func() tea.Msg { return statusMsg("summaries are disabled in config") }
 	}
@@ -731,6 +885,9 @@ func (m *Model) summaryElapsed(id string) (time.Duration, bool) {
 // rather than time passed.
 func (m *Model) summaryCoverage() (done, total, inflight int) {
 	for _, s := range m.view {
+		if pendingSession(s) {
+			continue
+		}
 		total++
 		if rec, have := m.summaries[s.ID]; have && !rec.Stale(s) {
 			done++
@@ -757,11 +914,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
+		var cmds []tea.Cmd
 		if m.icons == IconLogo && !m.logosSent {
 			m.logosSent = true
-			return m, logosCmd()
+			cmds = append(cmds, logosCmd())
 		}
-		return m, nil
+		if cmd := m.resizeEmbeddedCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case sendLogosMsg:
 		// Kitty virtual placements belong to the screen they were created on.
@@ -809,6 +970,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.scanGen {
 			return m, nil
 		}
+		if m.preparing != nil {
+			// Startup is one visual transaction. Applying a scan here would
+			// reorder the selected row and change header counts as soon as tmux
+			// exists, one frame before the prepared terminal is revealed.
+			m.scanning = false
+			m.rescan = false
+			return m, nil
+		}
 		wasIdle := !m.anyWorking()
 		m.scanning = false
 		m.all = msg.sessions
@@ -847,7 +1016,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		// Only keep animating while something is actually working, so an idle
 		// dashboard costs nothing.
-		if len(m.pending) > 0 || m.updating || m.anyWorking() {
+		if len(m.pending) > 0 || m.updating || m.preparing != nil || m.anyWorking() {
 			return m, cmd
 		}
 		return m, nil
@@ -865,6 +1034,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case paneOpenMsg:
 		m.streamOpening = false
 		if msg.err != "" {
+			if m.preparing != nil && m.embedded != "" {
+				// The agent is safely running in tmux, but Orbit cannot make the
+				// pane interactive without its control-mode PTY. Return to the
+				// dashboard instead of leaving a preparation screen spinning.
+				m.preparing = nil
+				m.embedded, m.embeddedCwd, m.embeddedName = "", "", ""
+				m.terminalFocused = false
+				m.terminalZoom = false
+				m.terminalW, m.terminalH = 0, 0
+				m.streamOff = true
+				m.say("session is running in tmux, but the live pane could not open: " + msg.err)
+				return m, nil
+			}
 			// One attempt, then stay on polling for the rest of the session.
 			// This is a capability difference, not a fault, so it goes to the
 			// status line rather than being presented as an error.
@@ -873,7 +1055,53 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.stream = msg.p
+		if m.embedded != "" && msg.p.Session() == m.embedded {
+			return m, tea.Batch(waitForPaneCmd(msg.p), m.resizeEmbeddedCmd())
+		}
 		return m, tea.Batch(waitForPaneCmd(msg.p), m.capture())
+
+	case paneReadyMsg:
+		revealed := false
+		if msg.err != "" {
+			m.say("live pane: " + msg.err)
+		}
+		if m.stream != nil && m.stream.Session() == msg.name {
+			m.preview, m.previewName = m.stream.Text(), msg.name
+		}
+		if m.preparing != nil && m.preparing.name == msg.name {
+			p := m.preparing
+			if msg.err != "" {
+				m.preparing = nil
+				// A failed switch may leave the shared stream showing its old
+				// session. Do not present that screen under the new session's name.
+				m.embedded, m.embeddedCwd, m.embeddedName = "", "", ""
+				m.terminalFocused = false
+				m.terminalZoom = false
+				m.terminalW, m.terminalH = 0, 0
+				return m, nil
+			}
+			if p.fresh {
+				m.addPendingSession(p.agent, p.name, p.cwd)
+			} else {
+				m.addResumedSession(driveReadyMsg{
+					name: p.name, cwd: p.cwd, id: p.id, title: p.title, agent: p.agent,
+				})
+			}
+			m.preparing = nil
+			revealed = true
+			m.say(p.agent.String() + " is ready in tmux — Tab returns to sessions")
+		}
+		if revealed {
+			return m, tea.Batch(m.pumpPaneInput(), m.refreshCmd())
+		}
+		return m, m.pumpPaneInput()
+
+	case paneInputDoneMsg:
+		m.inputSending = false
+		if msg.err != "" {
+			m.say("could not send input: " + msg.err)
+		}
+		return m, m.pumpPaneInput()
 
 	case paneDirtyMsg:
 		if m.stream == nil {
@@ -881,6 +1109,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.preview, m.previewName = m.stream.Text(), m.stream.Session()
 		return m, waitForPaneCmd(m.stream)
+
+	case paneSnapshotMsg:
+		if m.stream == nil || m.stream.Session() != msg.name {
+			return m, nil
+		}
+		m.preview, m.previewName = m.stream.Text(), msg.name
+		return m, nil
 
 	case paneGoneMsg:
 		if m.stream == nil {
@@ -902,8 +1137,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshCmd()
 
 	case readyMsg:
-		// Freshly spawned, so nothing can be attached yet — nothing to focus.
+		// Freshly resumed, so nothing can be attached yet — nothing to focus.
 		return m, m.attach(msg.name, msg.cwd, focusTarget{}, msg.mode)
+
+	case startedMsg:
+		if m.preparing != nil && m.preparing.fresh && m.preparing.agent == msg.agent && m.preparing.cwd == msg.cwd {
+			m.preparing.name = msg.name
+		} else {
+			m.addPendingSession(msg.agent, msg.name, msg.cwd)
+		}
+		return m, m.focusEmbedded(msg.name, msg.cwd, "new "+msg.agent.String())
+
+	case startFailedMsg:
+		if m.preparing != nil && m.preparing.fresh {
+			m.preparing = nil
+		}
+		m.say("start failed: " + msg.err)
+		return m, nil
+
+	case driveReadyMsg:
+		if m.preparing != nil && m.preparing.id == msg.id {
+			m.preparing.name = msg.name
+		}
+		return m, m.focusEmbedded(msg.name, msg.cwd, msg.title)
+
+	case driveFailedMsg:
+		if m.preparing != nil && m.preparing.id == msg.id {
+			m.preparing = nil
+		}
+		m.say("resume failed: " + msg.err)
+		return m, nil
 
 	case dispatchedMsg:
 		// Deliberately no attach. The point of a dispatch is that it runs
@@ -935,7 +1198,75 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// new binary once the program has returned.
 		return m, tea.Quit
 
+	case tea.PasteMsg:
+		if m.terminalFocused && m.embedded != "" {
+			// Preserve bracketed-paste semantics so a multi-line paste lands in
+			// the agent's editor instead of submitting one command per line.
+			return m, m.queuePaneInput(paneInput{
+				target: m.embedded,
+				text:   "\x1b[200~" + msg.Content + "\x1b[201~",
+			})
+		}
+		if m.dispatching {
+			return m, m.updateDispatchInput(msg)
+		}
+		if m.filtering {
+			var cmd tea.Cmd
+			m.filter, cmd = m.filter.Update(msg)
+			if !m.searching {
+				m.rebuild()
+			}
+			return m, cmd
+		}
+		return m, nil
+
+	case tea.MouseWheelMsg:
+		x, y, ok := m.terminalMousePosition(msg.X, msg.Y)
+		if !m.terminalFocused || m.embedded == "" || m.preparing != nil || !ok {
+			return m, nil
+		}
+		var direction pane.WheelDirection
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			direction = pane.WheelUp
+		case tea.MouseWheelDown:
+			direction = pane.WheelDown
+		default:
+			return m, nil
+		}
+		return m, m.queuePaneInput(paneInput{
+			target: m.embedded, wheel: direction, x: x, y: y,
+		})
+
 	case tea.KeyPressMsg:
+		if m.terminalFocused && m.embedded != "" {
+			// The pane does not own input until the control-mode PTY has been
+			// switched and sized. This also makes repeated Tab harmless during
+			// the short tmux-to-pane handoff.
+			if m.preparing != nil {
+				return m, nil
+			}
+			switch msg.String() {
+			case "tab", "ctrl+g":
+				return m, m.leaveEmbedded()
+			case "ctrl+f":
+				m.terminalZoom = !m.terminalZoom
+				m.terminalW, m.terminalH = 0, 0
+				return m, m.resizeEmbeddedCmd()
+			case "ctrl+e":
+				m.terminalWide = !m.terminalWide
+				m.terminalW, m.terminalH = 0, 0
+				return m, m.resizeEmbeddedCmd()
+			}
+			if input, ok := paneInputFor(msg); ok {
+				input.target = m.embedded
+				return m, m.queuePaneInput(input)
+			}
+			return m, nil
+		}
+		if m.dispatching {
+			return m, m.dispatchKey(msg)
+		}
 		if m.filtering {
 			switch msg.String() {
 			case "esc":
@@ -947,12 +1278,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				m.filtering = false
 				m.filter.Blur()
-				if m.dispatching {
-					task := m.filter.Value()
-					m.filter.SetValue("")
-					m.resetPrompt()
-					return m, m.dispatch(m.dispatchTo, m.dispatchInto, task)
-				}
 				if m.searching {
 					q := strings.TrimSpace(m.filter.Value())
 					m.filter.SetValue("")
@@ -971,7 +1296,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				var cmd tea.Cmd
 				m.filter, cmd = m.filter.Update(msg)
-				if !m.searching && !m.dispatching {
+				if !m.searching {
 					m.rebuild() // quick filter is live; the other two wait for enter
 				}
 				return m, cmd
@@ -984,32 +1309,54 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.showHelp {
+		switch msg.String() {
+		case "?", "esc":
+			m.showHelp = false
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "j", "down":
 		if m.cursor < len(m.view)-1 {
+			m.unmountEmbedded()
 			m.cursor++
 		}
 		return m, m.capture()
 	case "k", "up":
 		if m.cursor > 0 {
+			m.unmountEmbedded()
 			m.cursor--
 		}
 		return m, m.capture()
 	case "g", "home":
+		if m.cursor != 0 {
+			m.unmountEmbedded()
+		}
 		m.cursor = 0
 		return m, m.capture()
 	case "G", "end":
+		if m.cursor != max(0, len(m.view)-1) {
+			m.unmountEmbedded()
+		}
 		m.cursor = max(0, len(m.view)-1)
 		return m, m.capture()
+	case "?":
+		m.showHelp = true
+		return m, nil
 	case "/":
+		m.unmountEmbedded()
 		m.resetPrompt()
 		m.filtering = true
 		m.filter.Placeholder = "filter titles and paths"
 		m.filter.Focus()
 		return m, textinput.Blink
 	case "f":
+		m.unmountEmbedded()
 		m.resetPrompt()
 		m.searching = true
 		m.filtering = true
@@ -1025,13 +1372,14 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.say("sorted by " + m.sort.String())
 		return m, m.saveSort()
 	case "p":
-		m.group = !m.group
-		if m.group {
-			m.sort = session.SortProject
-			session.SortSessionsBy(m.all, m.sort)
-			m.rebuild()
+		m.group = m.group.next()
+		m.rebuild()
+		if m.group == groupNone {
+			m.say("grouping off")
+		} else {
+			m.say("grouped by " + m.group.String())
 		}
-		return m, tea.Batch(m.saveGroup(), m.saveSort())
+		return m, m.saveGroup()
 	case "s":
 		if sel := m.sel(); sel != nil {
 			return m, m.summarise(sel)
@@ -1066,6 +1414,8 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.open(attachWindow)
 	case "i":
 		return m, m.open(attachInline)
+	case "tab":
+		return m, m.enterEmbedded()
 	case "x":
 		return m, m.kill()
 	case "n":
@@ -1075,26 +1425,23 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.spawn(s.Agent, s.Cwd)
 	case "d":
-		ag, cwd, ok := m.dispatchTarget()
-		if !ok {
-			return m, nil
-		}
+		ag, cwd := m.dispatchTarget()
 		m.dispatchTo, m.dispatchInto = ag, cwd
 		m.dispatching, m.filtering = true, true
-		m.filter.Prompt = "⇢ " + ag.String() + " in " + shortDir(cwd) + ": "
-		m.filter.Placeholder = "what should it do?"
+		m.dispatchDirFocused = false
+		m.dispatchDirCursor = -1
+		m.status = ""
+		m.filter.Prompt = "› "
+		m.filter.Placeholder = "@codex can you check feature X?"
 		// Long enough for a real brief. The quick filter's 80 is a sensible
 		// cap on a substring match and an absurd one on a task description.
 		m.filter.CharLimit = 4000
 		m.filter.SetValue("")
 		m.filter.Focus()
+		m.dispatchDir.Prompt = "› "
+		m.dispatchDir.SetValue(cwd)
+		m.dispatchDir.Blur()
 		return m, textinput.Blink
-	case "1", "2", "3":
-		s := m.sel()
-		if s == nil {
-			return m, nil
-		}
-		return m, m.spawn(session.AllAgents[int(msg.String()[0]-'1')], s.Cwd)
 	}
 	return m, nil
 }
@@ -1105,6 +1452,10 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m *Model) open(mode attachMode) tea.Cmd {
 	s := m.sel()
 	if s == nil {
+		return nil
+	}
+	if m.preparing != nil && m.preparing.id == s.ID && m.preparing.agent == s.Agent {
+		m.say("this session is already being prepared for the live pane")
 		return nil
 	}
 	if s.Tmux != nil {
@@ -1132,15 +1483,30 @@ func (m *Model) spawn(ag session.Agent, cwd string) tea.Cmd {
 	if !ag.Installed() {
 		return func() tea.Msg { return statusMsg(ag.String() + " is not installed") }
 	}
-	mode := m.mode
-	m.say("starting " + ag.String() + " in " + cwd + "…")
-	return func() tea.Msg {
-		name, err := newSession(ag, cwd)
-		if err != nil {
-			return statusMsg("start failed: " + err.Error())
-		}
-		return readyMsg{name, cwd, mode}
+	if m.preparing != nil {
+		m.say("already preparing " + m.preparing.agent.String() + " for the live pane")
+		return nil
 	}
+	m.preparing = &drivePreparation{
+		cwd: cwd, title: "new " + ag.String(), agent: ag, fresh: true, started: time.Now(),
+	}
+	// The new transcript does not exist yet. Remember every conversation that
+	// could otherwise be mistaken for it; the tmux session carries this set
+	// until a scan sees exactly one genuinely new candidate.
+	var known []string
+	for _, s := range m.all {
+		if s.Agent == ag && s.Cwd == cwd && !pendingSession(s) {
+			known = append(known, s.ID)
+		}
+	}
+	start := func() tea.Msg {
+		name, err := newSession(ag, cwd, known)
+		if err != nil {
+			return startFailedMsg{err: err.Error()}
+		}
+		return startedMsg{name: name, cwd: cwd, agent: ag}
+	}
+	return tea.Batch(start, m.spin.Tick)
 }
 
 // focusTarget identifies the tab a session is already showing in: the tab id

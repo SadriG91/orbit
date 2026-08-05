@@ -23,6 +23,8 @@ func TestListParsesBothSeparatorForms(t *testing.T) {
 		"/home/u/work/api-gateway",     // session_path
 		"1785865000",                   // session_created
 		"tab-876faca00",                // @orbit_tab
+		"1",                            // @orbit_pending
+		"old-a,old-b",                  // @orbit_known
 	}
 
 	for _, tc := range []struct {
@@ -68,6 +70,9 @@ func TestListParsesBothSeparatorForms(t *testing.T) {
 			if s.TabID != "tab-876faca00" {
 				t.Errorf("TabID = %q, want tab-876faca00", s.TabID)
 			}
+			if !s.Pending || s.Known != "old-a,old-b" {
+				t.Errorf("pending identity = %v/%q", s.Pending, s.Known)
+			}
 		})
 	}
 }
@@ -76,7 +81,7 @@ func TestListParsesBothSeparatorForms(t *testing.T) {
 // has to survive the login-shell spelling tmux reports after an agent exits.
 func TestShellPaneMeansAgentNotRunning(t *testing.T) {
 	for _, cmd := range []string{"zsh", "-zsh", "bash", "fish", ""} {
-		line := strings.Join([]string{"n", "id", "claude", "0", "0", cmd, "t", "/tmp", "0", ""}, fieldSep)
+		line := strings.Join([]string{"n", "id", "claude", "0", "0", cmd, "t", "/tmp", "0", "", "", ""}, fieldSep)
 		s, ok := parseListLine(line)
 		if !ok {
 			t.Fatalf("%q did not parse", cmd)
@@ -88,10 +93,17 @@ func TestShellPaneMeansAgentNotRunning(t *testing.T) {
 }
 
 func TestListSkipsMalformedLines(t *testing.T) {
-	good := strings.Join([]string{"n", "id", "claude", "0", "0", "node", "t", "/tmp", "0", ""}, fieldSep)
+	good := strings.Join([]string{"n", "id", "claude", "0", "0", "node", "t", "/tmp", "0", "", "", ""}, fieldSep)
 	got := parseList("garbage\n" + good + "\n\n")
 	if len(got) != 1 {
 		t.Fatalf("parsed %d sessions, want only the well-formed one", len(got))
+	}
+}
+
+func TestLaunchLineClearsEchoBeforeStartingAgent(t *testing.T) {
+	got := launchLine("codex resume thread-123")
+	if got != `printf '\033[2J\033[H'; codex resume thread-123` {
+		t.Errorf("launchLine = %q", got)
 	}
 }
 

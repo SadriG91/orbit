@@ -21,8 +21,10 @@ recent_days = 30
 # age | tokens | project | agent   — press `o` to cycle at runtime
 sort = "age"
 
-# Group the list under project headings.
+# Group the list under headings. Press `p` to cycle off / project / agent;
+# `group` remembers whether grouping is on and `group_by` remembers its mode.
 group = false
+group_by = "project"
 
 # Give the shell time to start before typing into it.
 spawn_delay = "900ms"

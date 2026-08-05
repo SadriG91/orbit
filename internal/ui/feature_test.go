@@ -10,6 +10,7 @@ import (
 
 	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/pane"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/summary"
 	"github.com/sadrig91/orbit/internal/tmux"
@@ -50,6 +51,12 @@ func TestSummaryCoverageAdvancesOnCompletion(t *testing.T) {
 	}
 	if bar := m.coverageBar(); !strings.Contains(stripANSI(bar), "1/4 summarised") {
 		t.Errorf("bar label wrong: %q", stripANSI(bar))
+	}
+	if header := stripANSI(m.header()); strings.Contains(header, "summarised") {
+		t.Errorf("summary progress still crowds the header: %q", header)
+	}
+	if footer := stripANSI(m.footer()); !strings.Contains(footer, "1/4 summarised") {
+		t.Errorf("summary progress did not move to the footer: %q", footer)
 	}
 }
 
@@ -124,8 +131,8 @@ func TestUpdateSequence(t *testing.T) {
 	if m.Relaunch() != "" {
 		t.Error("a failed update must not trigger a restart")
 	}
-	if s := stripANSI(m.footer()); !strings.Contains(s, "failed") {
-		t.Errorf("a failed update was not reported: %q", s)
+	if s := stripANSI(m.header()); !strings.Contains(s, "failed") {
+		t.Errorf("a failed update was not reported in the header: %q", s)
 	}
 
 	// A successful one arms the relaunch and says what will happen.
@@ -134,8 +141,8 @@ func TestUpdateSequence(t *testing.T) {
 	if got := m.Relaunch(); got != "/opt/homebrew/bin/orbit" {
 		t.Errorf("Relaunch = %q, want the new binary", got)
 	}
-	if s := stripANSI(m.footer()); !strings.Contains(s, "restarting") {
-		t.Errorf("the restart was not announced: %q", s)
+	if s := stripANSI(m.header()); !strings.Contains(s, "restarting") {
+		t.Errorf("the restart was not announced in the header: %q", s)
 	}
 }
 
@@ -206,25 +213,53 @@ func TestAutoSummariseGuardsSpending(t *testing.T) {
 // fakePane stands in for a control client so the paths that matter — a
 // connection that dies — can be exercised without a tmux server.
 type fakePane struct {
-	session string
-	text    string
-	dirty   chan struct{}
-	done    chan struct{}
-	closed  bool
+	session  string
+	text     string
+	dirty    chan struct{}
+	done     chan struct{}
+	closed   bool
+	render   string
+	keys     []string
+	texts    []string
+	wheels   []fakeWheel
+	scrolled bool
+	w, h     int
+}
+
+type fakeWheel struct {
+	x, y      int
+	direction pane.WheelDirection
 }
 
 func newFakePane(session string) *fakePane {
 	return &fakePane{
 		session: session,
 		text:    "live output",
+		render:  "live output",
 		dirty:   make(chan struct{}, 1),
 		done:    make(chan struct{}),
 	}
 }
 
-func (f *fakePane) Session() string        { return f.session }
-func (f *fakePane) Text() string           { return f.text }
-func (f *fakePane) Switch(s string) error  { f.session = s; return nil }
+func (f *fakePane) Session() string       { return f.session }
+func (f *fakePane) Text() string          { return f.text }
+func (f *fakePane) Render() string        { return f.render }
+func (f *fakePane) Switch(s string) error { f.session = s; return nil }
+func (f *fakePane) Resize(w, h int) error { f.w, f.h = w, h; return nil }
+func (f *fakePane) SendKeyTo(_ string, key string) error {
+	f.keys = append(f.keys, key)
+	return nil
+}
+func (f *fakePane) SendTextTo(_ string, value string) error {
+	f.texts = append(f.texts, value)
+	return nil
+}
+func (f *fakePane) SendWheelTo(_ string, x, y int, direction pane.WheelDirection) error {
+	f.wheels = append(f.wheels, fakeWheel{x: x, y: y, direction: direction})
+	return nil
+}
+func (f *fakePane) Scrolled() bool         { return f.scrolled }
+func (f *fakePane) FollowTail()            { f.scrolled = false }
 func (f *fakePane) Dirty() <-chan struct{} { return f.dirty }
 func (f *fakePane) Done() <-chan struct{}  { return f.done }
 func (f *fakePane) Close() error           { f.closed = true; return nil }
@@ -261,6 +296,45 @@ func TestStalePollDoesNotOverwriteTheStream(t *testing.T) {
 	m.Update(previewMsg{name: "cl-other", text: "polled"})
 	if m.preview != "polled" {
 		t.Errorf("preview = %q, want a poll for another session to land", m.preview)
+	}
+}
+
+// Moving from a live row to a dormant transcript clears the cache but leaves
+// the one streaming client where it is. Returning to that live row must copy
+// its existing screen back immediately: an idle agent may never emit another
+// Dirty event to do it for us.
+func TestReturningToAlreadyWatchedSessionRestoresPreview(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	f := newFakePane("cl-live")
+	f.text = "idle agent prompt"
+	m.stream = f
+	m.all = []*session.Session{
+		{Agent: session.Claude, ID: "live", Cwd: "/work/live", Title: "live", Modified: time.Now(), State: session.YourTurn, Tmux: &tmux.Session{Name: "cl-live"}},
+		{Agent: session.Claude, ID: "dormant", Cwd: "/work/old", Title: "dormant", Modified: time.Now().Add(-time.Hour)},
+	}
+	m.rebuild()
+	m.preview, m.previewName = f.text, f.session
+
+	_, clear := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if clear == nil {
+		t.Fatal("moving to dormant row did not issue a preview clear")
+	}
+	m.Update(clear())
+	if m.preview != "" {
+		t.Fatalf("dormant row kept live preview %q", m.preview)
+	}
+
+	_, restore := m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	if restore == nil {
+		t.Fatal("returning to watched row did not request its snapshot")
+	}
+	msg := restore()
+	if _, ok := msg.(paneSnapshotMsg); !ok {
+		t.Fatalf("restore produced %T, want paneSnapshotMsg", msg)
+	}
+	m.Update(msg)
+	if m.preview != f.text || m.previewName != f.session {
+		t.Errorf("restored preview = %q/%q, want %q/%q", m.preview, m.previewName, f.text, f.session)
 	}
 }
 
@@ -420,8 +494,11 @@ func TestSortAndGroupKeysPersist(t *testing.T) {
 	if cfg, err = config.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Group != m.group {
-		t.Errorf("config says group = %v, want %v", cfg.Group, m.group)
+	if cfg.Group != (m.group != groupNone) {
+		t.Errorf("config says group = %v, want mode %v", cfg.Group, m.group)
+	}
+	if cfg.GroupBy != m.group.String() {
+		t.Errorf("config says group_by = %q, want %q", cfg.GroupBy, m.group.String())
 	}
 }
 

@@ -20,6 +20,7 @@ type Config struct {
 	RecentDays int      `toml:"recent_days"`
 	Sort       string   `toml:"sort"`
 	Group      bool     `toml:"group"`
+	GroupBy    string   `toml:"group_by"`
 	SpawnDelay string   `toml:"spawn_delay"`
 	TabDelay   string   `toml:"tab_delay"`
 	Summary    Summary  `toml:"summary"`

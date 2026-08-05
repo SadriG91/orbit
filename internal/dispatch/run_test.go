@@ -479,7 +479,7 @@ exit 1
 }
 
 // And a CLI that exits 0 without reading the prompt did no work; recording
-// that as a success would put a "your turn" on a conversation that never
+// that as a success would put "finished" on a conversation that never
 // happened.
 func TestRunDoesNotCallAnEmptyExitSuccess(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

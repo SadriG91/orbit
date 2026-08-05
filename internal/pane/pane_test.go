@@ -3,6 +3,7 @@ package pane
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/vt"
 )
@@ -13,6 +14,39 @@ func newTestPane(w, h int) *Pane {
 		emu:   vt.NewEmulator(w, h),
 		dirty: make(chan struct{}, 1),
 		done:  make(chan struct{}),
+	}
+}
+
+// Full-screen TUIs query their terminal and wait for a device response. The
+// emulator writes that response to its read side; leaving it undrained blocks
+// Emulator.Write while Pane.mu is held, freezing the entire dashboard the
+// next time it asks for Text, Render or Session.
+func TestTerminalQueryDoesNotHoldPaneLock(t *testing.T) {
+	p := newTestPane(40, 5)
+	read := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := p.emu.Read(buf)
+		read <- string(buf[:n])
+	}()
+	wrote := make(chan struct{})
+	go func() {
+		p.write([]byte("\x1b[6n")) // Device Status Report: cursor position.
+		close(wrote)
+	}()
+
+	select {
+	case <-wrote:
+	case <-time.After(time.Second):
+		t.Fatal("a terminal query blocked Pane.write")
+	}
+	select {
+	case got := <-read:
+		if !strings.Contains(got, "R") {
+			t.Errorf("cursor response = %q, want a CSI ... R response", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the emulator produced no cursor response")
 	}
 }
 
@@ -101,6 +135,26 @@ func TestRenderBeforeAttachIsEmpty(t *testing.T) {
 	p := &Pane{dirty: make(chan struct{}, 1), done: make(chan struct{})}
 	if got := p.Render(); got != "" {
 		t.Errorf("Render() with no emulator = %q, want empty", got)
+	}
+}
+
+func TestHistoryViewportAndFollowTail(t *testing.T) {
+	p := newTestPane(40, 5)
+	p.write([]byte("live tail"))
+	p.history = []string{"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"}
+	p.scrollOffset = 3
+
+	got := p.Render()
+	if !strings.Contains(got, "three") || !strings.Contains(got, "seven") || strings.Contains(got, "eight") {
+		t.Errorf("history viewport = %q, want rows three through seven", got)
+	}
+	if !p.Scrolled() {
+		t.Fatal("history viewport did not report its scrollback state")
+	}
+
+	p.FollowTail()
+	if p.Scrolled() || !strings.Contains(p.Render(), "live tail") {
+		t.Errorf("FollowTail did not restore the live emulator: %q", p.Render())
 	}
 }
 

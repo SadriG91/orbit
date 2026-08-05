@@ -2,7 +2,9 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,7 +26,7 @@ import (
 // session it belongs to. A detached process would have needed all four built.
 //
 // The runner ends by killing its own tmux session. That is what makes a
-// finished dispatch resolve to "your turn" and Enter resume the conversation
+// finished dispatch resolves to "finished" and Enter resumes the conversation
 // interactively, rather than attaching you to a dead shell — see
 // session.Resolve, which consults the dispatch record before it looks at tmux.
 
@@ -143,16 +145,208 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// dispatchTarget is where a new dispatch goes: the selected session's agent
-// and directory, the same rule `n` follows. Dispatch always starts a fresh
-// conversation — following up on an existing one means resuming it, which is
-// what Enter is for.
-func (m *Model) dispatchTarget() (session.Agent, string, bool) {
+// dispatchTarget supplies defaults for the composer. They are deliberately
+// only defaults: the directory field and a leading @agent mention can replace
+// either one before the task starts.
+func (m *Model) dispatchTarget() (session.Agent, string) {
 	s := m.sel()
-	if s == nil {
-		return 0, "", false
+	if s != nil {
+		return s.Agent, s.Cwd
 	}
-	return s.Agent, s.Cwd, true
+	ag := session.Claude
+	for _, candidate := range session.AllAgents {
+		if candidate.Installed() {
+			ag = candidate
+			break
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd, _ = os.UserHomeDir()
+	}
+	return ag, cwd
+}
+
+// parseDispatchPrompt reads an optional agent mention from the start of a
+// task. Keeping the selector in the task line makes the common action one
+// field and one Enter, while the composer still shows the fallback clearly.
+func parseDispatchPrompt(value string, fallback session.Agent) (session.Agent, string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback, "", errors.New("describe the task before dispatching")
+	}
+	first := value
+	if i := strings.IndexAny(value, " \t\r\n"); i >= 0 {
+		first = value[:i]
+	}
+	if !strings.HasPrefix(first, "@") {
+		return fallback, value, nil
+	}
+
+	var ag session.Agent
+	switch strings.ToLower(first) {
+	case "@claude":
+		ag = session.Claude
+	case "@codex":
+		ag = session.Codex
+	case "@copilot":
+		ag = session.Copilot
+	default:
+		return fallback, "", fmt.Errorf("unknown agent %s — use @claude, @codex, or @copilot", first)
+	}
+	prompt := strings.TrimSpace(value[len(first):])
+	if prompt == "" {
+		return ag, "", fmt.Errorf("add a task after %s", first)
+	}
+	return ag, prompt, nil
+}
+
+// resolveDispatchDir applies ordinary shell-like path rules without invoking
+// a shell: ~ means home, and relative paths start from Orbit's own cwd.
+func resolveDispatchDir(value, base string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("choose a directory before dispatching")
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("find home directory: %w", err)
+		}
+		value = filepath.Join(home, strings.TrimPrefix(value, "~/"))
+	} else if strings.HasPrefix(value, "~") {
+		return "", errors.New("only ~ and ~/path home shortcuts are supported")
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(base, value)
+	}
+	value = filepath.Clean(value)
+	info, err := os.Stat(value)
+	if err != nil {
+		return "", fmt.Errorf("directory %q: %w", value, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%q is not a directory", value)
+	}
+	return value, nil
+}
+
+func (m *Model) updateDispatchInput(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	if m.dispatchDirFocused {
+		m.dispatchDir, cmd = m.dispatchDir.Update(msg)
+		m.dispatchDirCursor = -1
+	} else {
+		m.filter, cmd = m.filter.Update(msg)
+	}
+	return cmd
+}
+
+func (m *Model) focusDispatchDirectory(on bool) tea.Cmd {
+	m.dispatchDirFocused = on
+	if on {
+		m.filter.Blur()
+		m.dispatchDirCursor = -1
+		for i, dir := range m.dispatchDirectories() {
+			if dir == m.dispatchDir.Value() {
+				m.dispatchDirCursor = i
+				break
+			}
+		}
+		return m.dispatchDir.Focus()
+	}
+	m.dispatchDir.Blur()
+	return m.filter.Focus()
+}
+
+// dispatchDirectories supplies the inline picker in recent-session order.
+// The captured default stays first even if the list re-sorts while composing.
+func (m *Model) dispatchDirectories() []string {
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(dir string) {
+		dir = filepath.Clean(strings.TrimSpace(dir))
+		if dir == "." || dir == "" || seen[dir] {
+			return
+		}
+		seen[dir] = true
+		dirs = append(dirs, dir)
+	}
+	add(m.dispatchInto)
+	for _, s := range m.view {
+		add(s.Cwd)
+	}
+	for _, s := range m.all {
+		add(s.Cwd)
+	}
+	return dirs
+}
+
+func (m *Model) moveDispatchDirectory(delta int) {
+	choices := m.dispatchDirectories()
+	if len(choices) == 0 {
+		return
+	}
+	if m.dispatchDirCursor < 0 {
+		m.dispatchDirCursor = 0
+	} else {
+		m.dispatchDirCursor = (m.dispatchDirCursor + delta + len(choices)) % len(choices)
+	}
+	m.dispatchDir.SetValue(choices[m.dispatchDirCursor])
+	m.dispatchDir.CursorEnd()
+}
+
+func (m *Model) dispatchKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.filtering = false
+		m.filter.SetValue("")
+		m.dispatchDir.SetValue("")
+		m.filter.Blur()
+		m.resetPrompt()
+		m.rebuild()
+		return nil
+	case "tab", "shift+tab":
+		return m.focusDispatchDirectory(!m.dispatchDirFocused)
+	case "up":
+		if m.dispatchDirFocused {
+			m.moveDispatchDirectory(-1)
+			return nil
+		}
+		return m.updateDispatchInput(msg)
+	case "down":
+		if m.dispatchDirFocused {
+			m.moveDispatchDirectory(1)
+			return nil
+		}
+		return m.updateDispatchInput(msg)
+	case "enter":
+		if m.dispatchDirFocused {
+			return m.focusDispatchDirectory(false)
+		}
+		ag, task, err := parseDispatchPrompt(m.filter.Value(), m.dispatchTo)
+		if err != nil {
+			m.say(err.Error())
+			return nil
+		}
+		base, err := os.Getwd()
+		if err != nil {
+			base = m.dispatchInto
+		}
+		cwd, err := resolveDispatchDir(m.dispatchDir.Value(), base)
+		if err != nil {
+			m.say(err.Error())
+			return m.focusDispatchDirectory(true)
+		}
+		m.filtering = false
+		m.filter.SetValue("")
+		m.dispatchDir.SetValue("")
+		m.filter.Blur()
+		m.resetPrompt()
+		return m.dispatch(ag, cwd, task)
+	default:
+		return m.updateDispatchInput(msg)
+	}
 }
 
 // dispatchLine is the one-line account of a dispatch for the detail pane.

@@ -2,6 +2,7 @@ package pane
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,11 @@ type Pane struct {
 	emu     *vt.Emulator
 	conn    *Conn
 	session string
+	// history is a frozen tmux scrollback snapshot. offset is the number of
+	// rows above the live tail. Control-mode streams pane output, not a tmux
+	// client's copy-mode viewport, so Orbit owns this viewport itself.
+	history      []string
+	scrollOffset int
 
 	dirty chan struct{}
 	done  chan struct{}
@@ -85,7 +91,33 @@ func (p *Pane) Render() string {
 	if p.emu == nil {
 		return ""
 	}
+	if p.scrollOffset > 0 && len(p.history) > 0 {
+		h := p.emu.Height()
+		end := max(0, len(p.history)-p.scrollOffset)
+		start := max(0, end-h)
+		return strings.Join(p.history[start:end], "\n")
+	}
 	return p.emu.Render()
+}
+
+// Scrolled reports whether Render is showing history instead of the live tail.
+func (p *Pane) Scrolled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.scrollOffset > 0
+}
+
+// FollowTail returns Render to the live pane. Keyboard input always calls this
+// first, matching ordinary terminal behavior where typing resumes at the prompt.
+func (p *Pane) FollowTail() {
+	p.mu.Lock()
+	changed := p.scrollOffset > 0
+	p.history = nil
+	p.scrollOffset = 0
+	p.mu.Unlock()
+	if changed {
+		p.markDirty()
+	}
 }
 
 // Text returns the screen as plain text, safe to truncate by rune count.
@@ -117,14 +149,111 @@ func (p *Pane) SetWatching(on bool) error { return p.conn.SetOutput(on) }
 
 // SendKeys relays the user's keystrokes to the pane.
 func (p *Pane) SendKeys(keys string) error {
+	p.FollowTail()
 	p.mu.Lock()
 	session := p.session
 	p.mu.Unlock()
 	return p.conn.SendKeys(session, keys)
 }
 
+// SendKeyTo relays one named tmux key to a specific session. The explicit
+// target matters when input is queued: the dashboard may move its preview to
+// another session before an earlier keystroke has finished crossing the
+// control connection.
+func (p *Pane) SendKeyTo(session, key string) error {
+	p.FollowTail()
+	return p.conn.SendKeys(session, key)
+}
+
+// SendTextTo relays literal UTF-8 to a specific session.
+func (p *Pane) SendTextTo(session, value string) error {
+	p.FollowTail()
+	return p.conn.SendText(session, value)
+}
+
+// SendWheelTo forwards a wheel event with coordinates relative to the embedded
+// terminal, preserving mouse-aware TUI behavior as well as tmux scrollback.
+func (p *Pane) SendWheelTo(session string, x, y int, direction WheelDirection) error {
+	mode, err := p.conn.inputMode(session)
+	if err != nil {
+		return err
+	}
+	if mode.mouse || mode.alternate {
+		p.FollowTail()
+		return p.conn.sendWheel(session, x, y, direction, mode)
+	}
+	return p.scrollHistory(session, direction)
+}
+
+func (p *Pane) scrollHistory(session string, direction WheelDirection) error {
+	p.mu.Lock()
+	if p.session != session {
+		p.mu.Unlock()
+		return fmt.Errorf("pane switched from %s to %s", session, p.session)
+	}
+	needSnapshot := len(p.history) == 0
+	p.mu.Unlock()
+
+	var snapshot []string
+	if needSnapshot {
+		out, err := p.conn.Command(fmt.Sprintf("capture-pane -p -e -S -5000 -t %s", session))
+		if err != nil {
+			return err
+		}
+		snapshot = out
+	}
+
+	p.mu.Lock()
+	if p.session != session {
+		p.mu.Unlock()
+		return fmt.Errorf("pane switched from %s to %s", session, p.session)
+	}
+	if len(p.history) == 0 {
+		p.history = snapshot
+	}
+	height := defaultRows
+	if p.emu != nil {
+		height = p.emu.Height()
+	}
+	maxOffset := max(0, len(p.history)-height)
+	if direction == WheelUp {
+		p.scrollOffset = min(maxOffset, p.scrollOffset+3)
+	} else {
+		p.scrollOffset = max(0, p.scrollOffset-3)
+		if p.scrollOffset == 0 {
+			p.history = nil
+		}
+	}
+	p.mu.Unlock()
+	p.markDirty()
+	return nil
+}
+
+// Resize changes the control client and emulator to the space Orbit gives an
+// explicitly focused terminal. Merely previewing a session never calls this.
+func (p *Pane) Resize(width, height int) error {
+	if width < 1 || height < 1 {
+		return nil
+	}
+	if err := p.conn.Resize(width, height); err != nil {
+		return err
+	}
+	// tmux redraws after the client resize, but reseeding immediately means the
+	// focused view does not spend a frame showing the old 220x60 screen.
+	p.reset(p.Session())
+	p.markDirty()
+	return nil
+}
+
 func (p *Pane) Close() error {
-	p.once.Do(func() { close(p.done) })
+	p.once.Do(func() {
+		close(p.done)
+		p.mu.Lock()
+		if p.emu != nil {
+			stopEmulator(p.emu)
+		}
+		p.mu.Unlock()
+	})
 	return p.conn.Close()
 }
 
@@ -141,14 +270,57 @@ func (p *Pane) reset(session string) {
 	seed := p.capture(session)
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.emu != nil {
-		p.emu.Close()
+		stopEmulator(p.emu)
 	}
 	p.session = session
-	p.emu = vt.NewEmulator(w, h)
+	p.history = nil
+	p.scrollOffset = 0
+	emu := vt.NewEmulator(w, h)
+	p.emu = emu
+	p.mu.Unlock()
+
+	// A terminal is bidirectional even when nobody is typing. Full-screen
+	// programs ask it questions such as "where is the cursor?" (CSI 6n); the
+	// emulator writes the answer to its read side. If nobody drains that side,
+	// Write blocks while holding Pane.mu and freezes both the stream and the UI.
+	// Forward those device replies to the program through tmux. Closing an old
+	// emulator during a reset ends its reader.
+	go p.reply(emu, session)
+
 	if seed != "" {
-		p.emu.WriteString(seed)
+		p.write([]byte(seed))
+	}
+}
+
+// stopEmulator closes the input pipe rather than Emulator.Close. The latter
+// reads and writes the emulator's unsynchronized closed flag concurrently with
+// Read, which the race detector catches whenever a pane is switched while its
+// reply goroutine is blocked. io.Pipe explicitly supports closing one end to
+// wake the other, and the old emulator is never written again after reset.
+func stopEmulator(emu *vt.Emulator) {
+	if closer, ok := emu.InputPipe().(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+func (p *Pane) reply(emu *vt.Emulator, session string) {
+	buf := make([]byte, 1024)
+	for {
+		n, err := emu.Read(buf)
+		if n > 0 {
+			// Best effort: a failed reply means the pane or connection went away,
+			// and the ordinary lifecycle notifications will reconcile that. Keep
+			// draining even after a send failure: abandoning the read side would
+			// make the next terminal query deadlock Emulator.Write again.
+			if p.conn == nil {
+				return
+			}
+			_ = p.conn.SendText(session, string(buf[:n]))
+		}
+		if err != nil {
+			return
+		}
 	}
 }
 

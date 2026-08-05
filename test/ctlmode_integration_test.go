@@ -3,6 +3,7 @@ package test
 import (
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -140,6 +141,36 @@ func TestControlModeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWaitForAgentCrossesTheShellBoundary(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	if err := tmux.InstallConf(); err != nil {
+		t.Fatalf("InstallConf: %v", err)
+	}
+
+	const name = "orbit-agent-ready"
+	cwd, _ := os.Getwd()
+	if err := tmux.Spawn(name, cwd, "sleep 5", "agent readiness", "codex", ""); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer tmux.Kill(name)
+
+	started := time.Now()
+	if err := tmux.WaitForAgent(name); err != nil {
+		t.Fatalf("WaitForAgent: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 150*time.Millisecond {
+		t.Errorf("agent was declared ready after only %s; want a stable non-shell process", elapsed)
+	}
+	if !waitForPaneFormat(t, name, "#{pane_current_command}", "sleep") {
+		t.Error("readiness returned without the foreground agent process")
+	}
+	if screen := tmux.Capture(name, 60); strings.Contains(screen, "sleep 5") || strings.Contains(screen, "printf") {
+		t.Errorf("the launch command remained visible after the agent took over:\n%s", screen)
+	}
+}
+
 func windowSize(t *testing.T, session string) string {
 	t.Helper()
 	out, err := exec.Command("tmux", tmux.Args("display-message", "-p", "-t", session,
@@ -148,6 +179,33 @@ func windowSize(t *testing.T, session string) string {
 		t.Fatalf("display-message size for %s: %v", session, err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func waitForPaneFormat(t *testing.T, session, format, want string) bool {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("tmux", tmux.Args("display-message", "-p", "-t", session, format)...).Output()
+		if err == nil && strings.TrimSpace(string(out)) == want {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+func waitForHistory(t *testing.T, session string, minimum int) bool {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("tmux", tmux.Args("display-message", "-p", "-t", session, "#{history_size}")...).Output()
+		n, parseErr := strconv.Atoi(strings.TrimSpace(string(out)))
+		if err == nil && parseErr == nil && n >= minimum {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
 
 // The emulator half, end to end: a pane seeded from what is already on screen,
@@ -196,12 +254,79 @@ func TestPaneStreamsLiveOutput(t *testing.T) {
 		t.Fatalf("the marker never reached the emulator")
 	}
 
+	// Focused terminals use the same connection to forward input. Literal
+	// text travels as hexadecimal bytes so quotes and tmux syntax can never be
+	// reinterpreted by the control command parser.
+	const literal = marker + "_LITERAL"
+	if err := p.SendTextTo(watched, "echo "+literal); err != nil {
+		t.Fatalf("SendTextTo: %v", err)
+	}
+	if err := p.SendKeyTo(watched, "Enter"); err != nil {
+		t.Fatalf("SendKeyTo: %v", err)
+	}
+	if !waitForRender(t, p, literal) {
+		t.Fatalf("literal input never reached the emulator")
+	}
+
+	if err := p.Resize(90, 25); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	if got := windowSize(t, watched); got != "90x25" {
+		t.Errorf("focused terminal size = %s, want 90x25", got)
+	}
+
+	// Mouse-aware TUIs must receive a real wheel event, not an Up key (which
+	// commonly means prompt history). Make the shell advertise SGR mouse mode
+	// just as Claude does, then exercise that control-mode path.
+	if err := p.SendTextTo(watched, "printf '\\033[?1000h\\033[?1006h'"); err != nil {
+		t.Fatalf("enable mouse tracking: %v", err)
+	}
+	if err := p.SendKeyTo(watched, "Enter"); err != nil {
+		t.Fatalf("submit mouse tracking command: %v", err)
+	}
+	if !waitForPaneFormat(t, watched, "#{mouse_sgr_flag}", "1") {
+		t.Fatal("pane never enabled SGR mouse tracking")
+	}
+	if err := p.SendWheelTo(watched, 4, 2, pane.WheelUp); err != nil {
+		t.Fatalf("SendWheelTo mouse-aware pane: %v", err)
+	}
+
 	// Moving the view must not leak the old session's screen into the new one.
 	if err := p.Switch(other); err != nil {
 		t.Fatalf("Switch: %v", err)
 	}
 	if p.Session() != other {
 		t.Errorf("after Switch, Session() = %q, want %q", p.Session(), other)
+	}
+	// A normal-screen program such as Codex has no mouse protocol of its own.
+	// Build enough history to scroll, then verify Orbit's pane-owned viewport;
+	// tmux copy mode is intentionally not used because its client viewport is
+	// invisible to the control-mode output stream.
+	if err := p.SendTextTo(other, "seq 1 80"); err != nil {
+		t.Fatalf("seed shell history: %v", err)
+	}
+	if err := p.SendKeyTo(other, "Enter"); err != nil {
+		t.Fatalf("submit shell history command: %v", err)
+	}
+	if !waitForHistory(t, other, 20) {
+		t.Fatal("shell output did not build tmux history")
+	}
+	liveTail := p.Render()
+	if err := p.SendWheelTo(other, 0, 0, pane.WheelUp); err != nil {
+		t.Fatalf("SendWheelTo shell pane: %v", err)
+	}
+	if !p.Scrolled() || p.Render() == liveTail {
+		out, _ := exec.Command("tmux", tmux.Args("display-message", "-p", "-t", other,
+			"history=#{history_size} alternate=#{alternate_on} mouse=#{mouse_any_flag}")...).Output()
+		t.Errorf("wheel-up did not expose Orbit scrollback (scrolled=%v unchanged=%v %s)",
+			p.Scrolled(), p.Render() == liveTail, strings.TrimSpace(string(out)))
+	}
+	if !waitForPaneFormat(t, other, "#{pane_in_mode}", "0") {
+		t.Error("Orbit scrollback leaked into tmux copy mode")
+	}
+	p.FollowTail()
+	if p.Scrolled() {
+		t.Error("FollowTail left the pane in scrollback")
 	}
 	if got := stripANSI(p.Render()); strings.Contains(got, marker) {
 		t.Errorf("the previous session's output survived the switch: %q", got)

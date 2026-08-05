@@ -231,7 +231,7 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 		case st.ask != nil:
 			// The handoff. See claudeHandoff for why this interrupts rather
 			// than merely denying.
-			say("▲ needs you — %s", st.ask.detail)
+			say("▲ needs attention — %s", st.ask.detail)
 			say("  handed back; ⏎ in orbit takes it over")
 			w.Write(claudeHandoff(st.ask.requestID))
 			res.handedTo = st.ask.detail
@@ -337,7 +337,7 @@ func finish(ctx context.Context, r *Record, res result, waitErr error, stderr st
 
 	default:
 		// Not one event, and a clean exit. Whatever that is, it is not a turn:
-		// filing it as done would put a "your turn" on a conversation that
+		// filing it as done would put "finished" on a conversation that
 		// never happened.
 		r.Status, r.Err = Failed, r.Agent+" exited without starting a turn"
 	}
