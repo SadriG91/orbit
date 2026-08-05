@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
@@ -49,6 +50,12 @@ func main() {
 		die(err)
 	}
 
+	// Before loading: settings added since the file was written are appended
+	// to it, so a new feature is visible where people look for it. Values
+	// already there are never touched, and a failure here is not worth
+	// mentioning — the config still loads, defaults still apply.
+	addedKeys, _ := config.Sync()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "orbit: config:", err, "(using defaults)")
@@ -70,6 +77,9 @@ func main() {
 
 	m := ui.New(cfg, attach, version)
 	defer m.Close()
+	if len(addedKeys) > 0 {
+		m.Warn("new settings added to your config: " + strings.Join(addedKeys, ", "))
+	}
 	m.Warn(term.Preflight())
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {

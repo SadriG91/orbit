@@ -286,9 +286,17 @@ server or read the actual session stores.
 
 `~/.config/orbit/config.toml` is written with annotated defaults on first run:
 icons, attach behaviour, notifications, `recent_days`, sort order, grouping,
-spawn delays and the per-provider summary commands. Environment variables
-(`ORBIT_ICONS`, `ORBIT_SPAWN_DELAY`, `ORBIT_TAB_DELAY`) still win over the file,
-so a single run can be changed without editing it.
+spawn delays, updates and the per-provider summary commands. Environment
+variables (`ORBIT_ICONS`, `ORBIT_SPAWN_DELAY`, `ORBIT_TAB_DELAY`) still win
+over the file, so a single run can be changed without editing it.
+
+Settings orbit gains later are appended to the file on the next start, with
+the comments that explain them, and orbit says which ones it added. It only
+ever adds: a key already in the file is left alone even when the shipped
+default has since changed, because at that point the value is a decision and
+nothing can tell a deliberate one from a leftover. So a new setting shows up
+where you'd look for it, and nothing you've edited is rewritten, reordered or
+reformatted.
 
 ### Agent logos
 

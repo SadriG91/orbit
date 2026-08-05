@@ -1,4 +1,6 @@
-# orbit configuration. Delete any key to fall back to its default.
+# orbit configuration. A key you delete falls back to its default, and orbit
+# appends settings to this file as it gains them — it never edits or reorders
+# what is already here, so anything you change stays changed.
 # Environment variables (ORBIT_ICONS, ORBIT_SPAWN_DELAY, ...) still win over
 # this file, so you can override a setting for one run without editing it.
 
