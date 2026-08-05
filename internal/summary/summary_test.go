@@ -237,3 +237,35 @@ func TestLastLine(t *testing.T) {
 		}
 	}
 }
+
+// Summaries are the one thing orbit stores that is genuinely content, so they
+// are written owner-only rather than at the default 0644.
+func TestSummaryIsWrittenOwnerOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	if err := os.WriteFile(path, []byte(
+		`{"type":"user","message":{"content":"hello"},"timestamp":"2026-08-05T10:00:00Z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{Agent: session.Claude, ID: "perm", Path: path, Msgs: 1}
+	cfg := config.Summary{Claude: config.Provider{Command: []string{"sh", "-c", "echo a summary"}}}
+
+	if _, err := Generate(s, cfg); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	fi, err := os.Stat(File(s))
+	if err != nil {
+		t.Fatalf("no summary written: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("summary mode = %v, want 0600", got)
+	}
+	di, err := os.Stat(Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := di.Mode().Perm(); got != 0o700 {
+		t.Errorf("summaries dir mode = %v, want 0700", got)
+	}
+}

@@ -67,3 +67,40 @@ func firstLines(s string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// A dump lands beside the summaries, which are conversation content, and there
+// is no reason for either to be readable by every account on a shared machine.
+func TestDumpIsOwnerOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := DumpPath()
+
+	if err := writeDump(path); err != nil {
+		t.Fatalf("writeDump: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("dump mode = %v, want 0600", got)
+	}
+	di, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := di.Mode().Perm(); got != 0o700 {
+		t.Errorf("cache dir mode = %v, want 0700", got)
+	}
+
+	// Rewriting must not widen it — O_TRUNC on an existing file keeps the old
+	// mode, so a dump written before this change stays as it was, but a fresh
+	// one must never come back permissive.
+	if err := writeDump(path); err != nil {
+		t.Fatalf("second writeDump: %v", err)
+	}
+	fi, _ = os.Stat(path)
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode after rewrite = %v, want 0600", got)
+	}
+}

@@ -65,10 +65,14 @@ func writeDump(path string) error {
 		buf = make([]byte, len(buf)*2)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// Owner-only. A stack dump is the least revealing thing orbit writes —
+	// function names and goroutine states, not conversation content — but it
+	// lands in the same directory as the summaries, which are the opposite,
+	// and there is no reason for either to be world-readable on a shared box.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
