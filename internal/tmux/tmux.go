@@ -106,8 +106,14 @@ const (
 // error anywhere. Accept both forms rather than trusting one.
 const fieldSepEscaped = `\037`
 
-func splitFields(line string) []string {
-	if f := strings.Split(line, fieldSep); len(f) >= listFields {
+// splitFields takes the number of fields the caller asked tmux for, because
+// that count is how the two separator forms are told apart: a raw split that
+// comes up short means this tmux escaped them. Hardcoding one format's width
+// here silently breaks every other format — a two-field line always looks
+// "short" against a ten-field expectation and falls through to the escaped
+// split, which then finds nothing to split on.
+func splitFields(line string, want int) []string {
+	if f := strings.Split(line, fieldSep); len(f) >= want {
 		return f
 	}
 	return strings.Split(line, fieldSepEscaped)
@@ -125,7 +131,53 @@ func List() []*Session {
 	if err != nil {
 		return nil // no server running yet is the normal case
 	}
-	return parseList(string(out))
+	res := parseList(string(out))
+
+	// #{session_attached} counts every client, and orbit's own live-preview
+	// client is one of them — so merely looking at a session would make it
+	// report as attached, and Enter would try to focus a terminal tab that
+	// was never opened. Ask which sessions have a client that is not a
+	// control client, and let that be the answer.
+	//
+	// On error the parsed value stands. That is today's behaviour, and the
+	// failure it causes is self-correcting: focusing a tab that isn't there
+	// falls back to opening one.
+	if real := realClients(); real != nil {
+		for _, s := range res {
+			s.Attached = real[s.Name]
+		}
+	}
+	return res
+}
+
+const (
+	clientFields = 2
+	clientFmt    = "#{client_session}" + fieldSep + "#{client_control_mode}"
+)
+
+// realClients maps session name to "a human's terminal is attached to this",
+// ignoring control-mode clients. Nil means the question could not be asked.
+func realClients() map[string]bool {
+	out, err := output("list-clients", "-F", clientFmt)
+	if err != nil {
+		return nil
+	}
+	return parseClients(string(out))
+}
+
+func parseClients(out string) map[string]bool {
+	res := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := splitFields(line, clientFields)
+		if len(f) < 2 || f[0] == "" {
+			continue
+		}
+		if f[1] == "1" {
+			continue // orbit's own preview client
+		}
+		res[f[0]] = true
+	}
+	return res
 }
 
 func parseList(out string) []*Session {
@@ -139,7 +191,7 @@ func parseList(out string) []*Session {
 }
 
 func parseListLine(line string) (*Session, bool) {
-	f := splitFields(line)
+	f := splitFields(line, listFields)
 	if len(f) < listFields {
 		return nil, false
 	}

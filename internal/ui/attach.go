@@ -58,6 +58,11 @@ func (m attachMode) resolve() attachMode {
 // client is attached somewhere, and the resolved mode would spawn another
 // one. Inline is exempt — attaching a second client in place just mirrors
 // the session, and asking for it explicitly is a fine way to do that.
+//
+// "Attached" here means a terminal someone is looking at. orbit's own live
+// preview holds a control client on whichever session is selected, and
+// tmux.List excludes those precisely so that browsing a session does not make
+// it look open.
 func alreadyOpen(s *session.Session, resolved attachMode) bool {
 	return s.Tmux != nil && s.Tmux.Attached && resolved != attachInline
 }
