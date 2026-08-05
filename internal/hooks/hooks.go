@@ -18,8 +18,8 @@
 //
 // Copilot raises the stakes further: its preToolUse hook is fail-closed. A
 // non-zero exit — including a crash — denies the user's tool call outright,
-// and exit 2 denies even when stdout says allow. So the hook entry point must
-// reach exit 0 on every path, panic included, and write nothing to stdout,
+// and exit 2 denies even when stdout says allow. Dispatch owns that contract,
+// next to where it is stated: swallow everything, say nothing on stdout,
 // which several of these events interpret as instructions.
 package hooks
 
@@ -48,52 +48,61 @@ type State struct {
 	Status Status    `json:"status"`
 	Event  string    `json:"event"`
 	At     time.Time `json:"at"`
+	// Soft marks a status the emitting agent cannot make definitive. Copilot
+	// has no approval event, so its Working only means "a tool started" —
+	// which is exactly the ambiguous state — and the reader should stop
+	// believing it once it has sat still. The judgement of which events are
+	// soft lives here, with the event tables, not with the reader.
+	Soft bool `json:"soft,omitempty"`
+	// ToolUseID pins a NeedsYou to the tool call that asked. Agents run tool
+	// batches in parallel, and without it the PostToolUse of some
+	// auto-approved read arriving a beat later would clear a prompt that is
+	// still on screen — see Record.
+	ToolUseID string `json:"tool_use_id,omitempty"`
 }
 
-// transitions maps each agent's event names to a status. Absent means the
-// event is not subscribed or carries no state worth recording.
+// rule is one event's contribution to state.
+type rule struct {
+	status Status
+	soft   bool
+}
+
+// transitions maps each agent's event names to a rule. Absent means the event
+// is not subscribed or carries no state worth recording.
 //
 // Notification is deliberately missing for claude: it fires about six seconds
 // after the prompt has been sitting, measured — subscribing to it would
 // rebuild the exact lag this package exists to remove. PermissionRequest is
 // the same-second signal.
 //
-// Copilot has no approval event at all, so nothing there can produce
-// NeedsYou; its pending approvals stay with the transcript inference, which
-// treats a copilot Working entry as soft — see session.Resolve.
-var transitions = map[string]map[string]Status{
+// Copilot's rows are the camelCase names that actually fired in a live run;
+// the PascalCase aliases its reference documents are deliberately absent
+// until someone fires them — they include an approval event nobody has seen
+// work, and an unverified NeedsYou would put a false triangle on a session
+// with nothing on screen. Every copilot Working is soft for the same reason:
+// with no approval event, "a tool started" is all it can ever mean.
+var transitions = map[string]map[string]rule{
 	"claude": {
-		"UserPromptSubmit":  Working,
-		"PermissionRequest": NeedsYou,
-		"PermissionDenied":  Working, // answered; the model carries on
-		"PostToolUse":       Working, // also the edge that clears an approval
-		"Stop":              YourTurn,
+		"SessionStart":       {YourTurn, false}, // matcher-limited to startup|resume|clear; see install.go
+		"UserPromptSubmit":   {Working, false},
+		"PermissionRequest":  {NeedsYou, false},
+		"PermissionDenied":   {Working, false}, // answered; the model carries on
+		"PostToolUse":        {Working, false}, // also the edge that clears an approval
+		"PostToolUseFailure": {Working, false}, // a failed tool is answered too
+		"Stop":               {YourTurn, false},
 	},
 	"codex": {
-		"UserPromptSubmit":  Working,
-		"PermissionRequest": NeedsYou,
-		"PostToolUse":       Working,
-		"Stop":              YourTurn,
+		"SessionStart":      {YourTurn, false},
+		"UserPromptSubmit":  {Working, false},
+		"PermissionRequest": {NeedsYou, false},
+		"PostToolUse":       {Working, false},
+		"Stop":              {YourTurn, false},
 	},
-	// Both spellings for copilot. The camelCase names are what fired in our
-	// live test; the reference also documents PascalCase aliases that emit
-	// the Claude-shaped snake_case payload instead — including a
-	// PermissionRequest alias whose firing nobody has verified (the matching
-	// string in the bundled CLI sits in its ACP layer, a different
-	// mechanism). Which set the installed config registers is decided at
-	// install time, with a live test; the table accepts either so that
-	// decision doesn't reach back here.
 	"copilot": {
-		"userPromptSubmitted": Working,
-		"preToolUse":          Working,
-		"postToolUse":         Working,
-		"agentStop":           YourTurn,
-
-		"UserPromptSubmit":  Working,
-		"PreToolUse":        Working,
-		"PostToolUse":       Working,
-		"Stop":              YourTurn,
-		"PermissionRequest": NeedsYou,
+		"userPromptSubmitted": {Working, true},
+		"preToolUse":          {Working, true},
+		"postToolUse":         {Working, true},
+		"agentStop":           {YourTurn, false},
 	},
 }
 
@@ -104,22 +113,36 @@ var ended = map[string]bool{"SessionEnd": true, "sessionEnd": true}
 // Dir is where the state files live: one small JSON per live session.
 func Dir() string { return format.Home(".cache", "orbit", "state") }
 
-// Run handles `orbit hook <agent> <event>`. It must never fail in a way the
-// agent notices: whatever goes wrong, the answer is a clean exit and silence
-// on stdout — several of these events interpret stdout as instructions.
-func Run(agent, event string, stdin io.Reader) {
-	_ = Record(agent, event, stdin)
+// Dispatch handles the `orbit hook <agent> <event>` argv, and owns the
+// contract the package doc states: nothing on stdout, no panic escapes, and
+// the caller exits 0 whenever this returns true — however mangled the argv,
+// because a truncated invocation falling through to the normal CLI would
+// exit non-zero, and on copilot that denies the user's tool call.
+func Dispatch(args []string, stdin io.Reader) (handled bool) {
+	if len(args) < 2 || args[1] != "hook" {
+		return false
+	}
+	defer func() { recover() }() //nolint:errcheck // silence is the contract
+	if len(args) >= 4 {
+		_ = Record(args[2], args[3], stdin)
+	}
+	return true
 }
 
-// Record applies one event. Exposed separately from Run so tests can see the
-// errors Run deliberately swallows.
+// Record applies one event. Dispatch discards the error — silence is the
+// contract on the hook path — but tests need to see it.
 func Record(agent, event string, stdin io.Reader) error {
+	// The agent name arrives as argv from whatever hook config invoked us and
+	// becomes part of a path, so it gets the same treatment as the id.
+	agent = sanitize(agent)
+
 	// The payload identifies the session. Claude and codex spell the field
-	// session_id, copilot spells it sessionId; everything else in the payload
-	// is noise for this purpose.
+	// session_id, copilot spells it sessionId; the tool_use_id, where an
+	// event carries one, ties approvals to answers.
 	var p struct {
 		SessionID  string `json:"session_id"`
 		SessionID2 string `json:"sessionId"`
+		ToolUseID  string `json:"tool_use_id"`
 	}
 	if err := json.NewDecoder(io.LimitReader(stdin, 1<<20)).Decode(&p); err != nil {
 		return err
@@ -137,22 +160,49 @@ func Record(agent, event string, stdin io.Reader) error {
 		os.Remove(file(agent, id))
 		return nil
 	}
-	status, ok := transitions[agent][event]
+	r, ok := transitions[agent][event]
 	if !ok {
 		return nil // unsubscribed or unknown; not an error, just not ours
 	}
 
-	if err := os.MkdirAll(Dir(), 0o700); err != nil {
+	dir := Dir()
+	if !filepath.IsAbs(dir) {
+		// No HOME in the hook's environment. Writing a relative .cache tree
+		// into whatever cwd the agent gave us would litter repositories with
+		// state files the dashboard could never find anyway.
+		return nil
+	}
+
+	// Agents run tool batches in parallel. When a prompt is parked, the
+	// PostToolUse of some other, auto-approved call must not clear it — only
+	// the answer to the call that asked does. Comparing tool ids is how the
+	// two are told apart; an event without one keeps last-writer behaviour,
+	// which is also what absorbs the read-then-write race between two hook
+	// processes: the next event corrects it.
+	if r.status == Working && (event == "PostToolUse" || event == "PostToolUseFailure") {
+		if cur, ok := Load(agent, id); ok &&
+			cur.Status == NeedsYou && cur.ToolUseID != "" &&
+			p.ToolUseID != "" && p.ToolUseID != cur.ToolUseID {
+			return nil
+		}
+	}
+
+	st := State{Status: r.status, Event: event, At: time.Now(), Soft: r.soft}
+	if r.status == NeedsYou {
+		st.ToolUseID = p.ToolUseID
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(State{Status: status, Event: event, At: time.Now()})
-	if err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	// Written beside and renamed over, so the scan can never read half a
 	// file. The scan runs every couple of seconds; torn reads would be
-	// routine, not rare.
-	tmp, err := os.CreateTemp(Dir(), ".state-*")
+	// routine, not rare. CreateTemp already opens 0600, matching the rest of
+	// orbit's cache.
+	tmp, err := os.CreateTemp(dir, ".state-*")
 	if err != nil {
 		return err
 	}
@@ -164,15 +214,12 @@ func Record(agent, event string, stdin io.Reader) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
-		return err
-	}
 	return os.Rename(tmp.Name(), file(agent, id))
 }
 
 // Load returns the recorded state for a session, if any.
 func Load(agent, id string) (State, bool) {
-	b, err := os.ReadFile(file(agent, sanitize(id)))
+	b, err := os.ReadFile(file(sanitize(agent), sanitize(id)))
 	if err != nil {
 		return State{}, false
 	}
@@ -183,12 +230,22 @@ func Load(agent, id string) (State, bool) {
 	return st, true
 }
 
+// Forget drops a session's recorded state. Called when orbit is about to
+// resume a session: whatever the file claims is from a previous run — often
+// one that ended in a kill, since kill-session SIGHUPs the agent and its
+// SessionEnd hook never fires — and a fresh claude at an idle prompt emits
+// nothing until you type, so a stale claim would stand indefinitely.
+func Forget(agent, id string) {
+	os.Remove(file(sanitize(agent), sanitize(id)))
+}
+
 // Prune removes state files that have not been touched in a while. SessionEnd
-// removes them properly; this catches the sessions that never got one — a
-// killed agent, a crashed machine — before the directory fills with claims
-// about conversations long over.
+// removes them properly and Forget covers resumes; this catches what is left
+// — sessions that died and were never touched again — before the directory
+// fills with claims about conversations long over.
 func Prune(olderThan time.Duration) {
-	entries, err := os.ReadDir(Dir())
+	dir := Dir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
@@ -196,17 +253,17 @@ func Prune(olderThan time.Duration) {
 	for _, e := range entries {
 		info, err := e.Info()
 		if err == nil && info.ModTime().Before(cutoff) {
-			os.Remove(filepath.Join(Dir(), e.Name()))
+			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 }
 
 func file(agent, id string) string { return filepath.Join(Dir(), agent+"-"+id+".json") }
 
-// sanitize keeps a session id usable as a filename component. Ids are UUIDs
-// from the agents' own stores, but they arrive over stdin from a subprocess
-// invocation and are about to become a path — so nothing traversal-shaped
-// gets through on principle.
+// sanitize keeps a value usable as a filename component. Ids are UUIDs from
+// the agents' own stores and the agent name is orbit's own argv, but both
+// arrive from outside this process and are about to become a path — so
+// nothing traversal-shaped gets through on principle.
 func sanitize(id string) string {
 	return strings.Map(func(r rune) rune {
 		switch {

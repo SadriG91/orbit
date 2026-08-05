@@ -218,7 +218,7 @@ func (s *Session) Resolve(now time.Time) {
 	case HintMaybeApproval:
 		// An unanswered tool call. If it's been sitting there, the tool isn't
 		// slow — the agent is parked on a permission prompt.
-		if now.Sub(s.Modified) > 12*time.Second {
+		if now.Sub(s.Modified) > stillnessWindow {
 			s.State = NeedsApproval
 		} else {
 			s.State = Working
@@ -228,26 +228,44 @@ func (s *Session) Resolve(now time.Time) {
 	}
 }
 
+// stillnessWindow is how long an unanswered tool call may sit before the
+// inference calls it a permission prompt — and how long a soft hook Working
+// is believed before handing back to that same inference. One constant
+// because they are the same judgement: how much stillness means "parked".
+const stillnessWindow = 12 * time.Second
+
 // hookTrusted decides whether a recorded hook state still speaks for this
 // session.
 //
-// The transcript moving on past the state file means the hooks are not
-// reporting for this run — a session resumed by hand, without orbit's
-// injection, keeps writing its transcript while the old state file just
-// sits there claiming whatever was true last time. The margin absorbs the
-// write-behind the transcripts are documented to have.
+// The transcript outrunning the state file means the hooks are not reporting
+// for this run — a session relaunched by hand inside its pane, without
+// orbit's injection, keeps writing its transcript while the old file sits
+// there claiming last run's truth. The margin covers the write-behind the
+// transcripts are documented to have (Claude calls transcript_path
+// asynchronous and possibly lagging); a transient distrust during a long
+// generation is harmless, because the inference it falls back to handles
+// fresh activity correctly and the next event restores trust.
 //
-// Copilot gets one more condition: it has no approval event, so its Working
-// entries only mean "a tool started", which is exactly the ambiguous state.
-// Fresh, that is fine — a prompt needs a beat to matter — but a copilot
-// Working left sitting has to fall back to the stillness inference or a
-// parked approval there would read as Working forever, which is the very
-// bug this package exists to end.
+// The transcript can also flatly contradict the file, and a definite
+// transcript beats a hook claim: HintDone means a finished turn was written,
+// so anything but YourTurn is a stale file (a lost Stop event would
+// otherwise pin "working" forever — the transcript is the self-correction
+// the old inference had, kept). HintApproval is codex's explicit approval
+// marker, which no Working claim should override.
+//
+// Soft states expire into the stillness inference; the judgement of which
+// events are soft lives in the hooks package, with the event tables.
 func (s *Session) hookTrusted(st hooks.State, now time.Time) bool {
 	if s.Modified.After(st.At.Add(30 * time.Second)) {
 		return false
 	}
-	if s.Agent == Copilot && st.Status == hooks.Working && now.Sub(st.At) > 12*time.Second {
+	if s.hint == HintDone && st.Status != hooks.YourTurn {
+		return false
+	}
+	if s.hint == HintApproval && st.Status == hooks.Working {
+		return false
+	}
+	if st.Soft && st.Status == hooks.Working && now.Sub(st.At) > stillnessWindow {
 		return false
 	}
 	return true

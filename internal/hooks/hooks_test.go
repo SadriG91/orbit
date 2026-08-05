@@ -95,7 +95,7 @@ func TestGarbageNeverPanicsOrWrites(t *testing.T) {
 					t.Fatalf("input %q panicked: %v", in, r)
 				}
 			}()
-			Run("claude", "Stop", strings.NewReader(in))
+			_ = Record("claude", "Stop", strings.NewReader(in))
 		}()
 	}
 	if entries, err := os.ReadDir(Dir()); err == nil && len(entries) > 0 {
@@ -103,8 +103,8 @@ func TestGarbageNeverPanicsOrWrites(t *testing.T) {
 	}
 
 	// Unknown agents and events are not ours to interpret.
-	Run("mystery-agent", "Stop", strings.NewReader(claudePayload))
-	Run("claude", "SomeFutureEvent", strings.NewReader(claudePayload))
+	_ = Record("mystery-agent", "Stop", strings.NewReader(claudePayload))
+	_ = Record("claude", "SomeFutureEvent", strings.NewReader(claudePayload))
 	if entries, err := os.ReadDir(Dir()); err == nil && len(entries) > 0 {
 		t.Errorf("unknown agent/event wrote state")
 	}
@@ -174,10 +174,7 @@ func TestPruneSweepsOnlyOldFiles(t *testing.T) {
 // agent's loop), and the orbit binary by absolute path, since a tmux login
 // shell promises nothing about PATH.
 func TestClaudeSettingsShape(t *testing.T) {
-	b, err := ClaudeSettings("/opt/homebrew/bin/orbit")
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := ClaudeSettings("/opt/homebrew/bin/orbit")
 	var cfg struct {
 		Hooks map[string][]struct {
 			Hooks []struct {
@@ -190,7 +187,7 @@ func TestClaudeSettingsShape(t *testing.T) {
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		t.Fatalf("the settings do not parse: %v", err)
 	}
-	for _, want := range []string{"PermissionRequest", "PostToolUse", "Stop", "UserPromptSubmit", "SessionEnd"} {
+	for _, want := range []string{"SessionStart", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit", "SessionEnd"} {
 		if _, ok := cfg.Hooks[want]; !ok {
 			t.Errorf("missing %s", want)
 		}
@@ -201,7 +198,7 @@ func TestClaudeSettingsShape(t *testing.T) {
 	for ev, matchers := range cfg.Hooks {
 		for _, m := range matchers {
 			for _, h := range m.Hooks {
-				if h.Command != "/opt/homebrew/bin/orbit hook claude "+ev {
+				if h.Command != "'/opt/homebrew/bin/orbit' hook claude "+ev {
 					t.Errorf("%s command = %q", ev, h.Command)
 				}
 				if h.Timeout == 0 || h.Timeout > 10 {
@@ -216,12 +213,14 @@ func TestClaudeSettingsShape(t *testing.T) {
 // others must get nothing rather than a flag their CLI will choke on.
 func TestSpawnArgs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	executable = func() (string, error) { return "/opt/homebrew/bin/orbit", nil }
+	t.Cleanup(func() { executable = os.Executable })
 
 	got := SpawnArgs("claude")
-	if !strings.HasPrefix(got, " --settings ") {
-		t.Fatalf("claude args = %q", got)
+	if !strings.HasPrefix(got, " --settings '") || !strings.HasSuffix(got, "'") {
+		t.Fatalf("claude args = %q, want a quoted path", got)
 	}
-	path := strings.TrimPrefix(got, " --settings ")
+	path := strings.Trim(strings.TrimPrefix(got, " --settings "), "'")
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("the settings file was not written: %v", err)
 	}
@@ -239,5 +238,157 @@ func TestSpawnArgs(t *testing.T) {
 		if got := SpawnArgs(agent); got != "" {
 			t.Errorf("SpawnArgs(%q) = %q, want empty until wired", agent, got)
 		}
+	}
+}
+
+// Dispatch owns the exit-0 contract, so it must claim any argv naming the
+// subcommand — however mangled — and never let a panic escape. A truncated
+// invocation falling through to the normal CLI would exit non-zero, and on
+// copilot that denies the user's tool call.
+func TestDispatchClaimsTheHookWordWhateverFollows(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	for _, args := range [][]string{
+		{"orbit", "hook"},
+		{"orbit", "hook", "claude"},
+		{"orbit", "hook", "claude", "Stop"},
+		{"orbit", "hook", "claude", "Stop", "extra", "junk"},
+		{"orbit", "hook", "../../etc", "SessionEnd"},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%v panicked through Dispatch: %v", args, r)
+				}
+			}()
+			if !Dispatch(args, strings.NewReader("garbage")) {
+				t.Errorf("%v was not claimed", args)
+			}
+		}()
+	}
+	for _, args := range [][]string{{"orbit"}, {"orbit", "--list"}, {"orbit", "hooky", "x", "y"}} {
+		if Dispatch(args, strings.NewReader("")) {
+			t.Errorf("%v was wrongly claimed as a hook invocation", args)
+		}
+	}
+}
+
+// Agents run tool batches in parallel: an auto-approved read finishing a beat
+// after a prompt appears must not clear it. Only the answer to the call that
+// asked — the PostToolUse carrying the same tool id — does.
+func TestForeignPostToolUseDoesNotClearAParkedPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const id = "4da26e73-aaaa-bbbb-cccc-000000000001"
+	ask := `{"session_id":"` + id + `","tool_use_id":"toolu_bash"}`
+	other := `{"session_id":"` + id + `","tool_use_id":"toolu_read"}`
+	same := ask
+
+	Record("claude", "PermissionRequest", strings.NewReader(ask))
+	Record("claude", "PostToolUse", strings.NewReader(other))
+	if st, _ := Load("claude", id); st.Status != NeedsYou {
+		t.Fatalf("a foreign PostToolUse cleared the prompt: %q", st.Status)
+	}
+	// The real answer clears it.
+	Record("claude", "PostToolUse", strings.NewReader(same))
+	if st, _ := Load("claude", id); st.Status != Working {
+		t.Errorf("the matching PostToolUse did not clear it: %q", st.Status)
+	}
+	// And an event with no id keeps last-writer behaviour rather than pinning.
+	Record("claude", "PermissionRequest", strings.NewReader(`{"session_id":"`+id+`"}`))
+	Record("claude", "PostToolUse", strings.NewReader(`{"session_id":"`+id+`"}`))
+	if st, _ := Load("claude", id); st.Status != Working {
+		t.Errorf("id-less events stopped clearing: %q", st.Status)
+	}
+}
+
+// Forget is the resume-time hygiene: whatever the file claims is from a
+// previous run, and a fresh agent at an idle prompt emits nothing to
+// correct it.
+func TestForgetDropsTheState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const id = "4da26e73-aaaa-bbbb-cccc-000000000001"
+	Record("claude", "PermissionRequest", strings.NewReader(claudePayload))
+	Forget("claude", id)
+	if _, ok := Load("claude", id); ok {
+		t.Error("Forget left the state behind")
+	}
+	Forget("claude", "never-existed") // must be a no-op, not a panic
+}
+
+// Copilot's Working is soft — with no approval event it only means "a tool
+// started" — and the softness judgement must travel in the State, where the
+// event tables live, not be re-derived by readers from agent names.
+func TestCopilotWorkingIsMarkedSoft(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const id = "ef5477fa-c9ad-4138-8993-878e7ad55337"
+
+	Record("copilot", "preToolUse", strings.NewReader(copilotPayload))
+	st, _ := Load("copilot", id)
+	if !st.Soft {
+		t.Error("copilot Working was not marked soft")
+	}
+	Record("copilot", "agentStop", strings.NewReader(copilotPayload))
+	if st, _ = Load("copilot", id); st.Soft {
+		t.Error("copilot YourTurn is definitive and must not be soft")
+	}
+	Record("claude", "PostToolUse", strings.NewReader(claudePayload))
+	if st, _ = Load("claude", "4da26e73-aaaa-bbbb-cccc-000000000001"); st.Soft {
+		t.Error("claude Working marked soft — it has a real approval event")
+	}
+}
+
+// Both paths that reach a shell are quoted: the settings path typed into the
+// spawn line, and the binary path Claude runs the hook command through.
+func TestPathsWithSpacesAreQuoted(t *testing.T) {
+	b := ClaudeSettings("/Users/jane doe/go/bin/orbit")
+	if !strings.Contains(string(b), `'/Users/jane doe/go/bin/orbit' hook claude Stop`) {
+		t.Errorf("the hook command is not quoted:\n%s", b)
+	}
+
+	home := filepath.Join(t.TempDir(), "jane doe")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	executable = func() (string, error) { return "/opt/homebrew/bin/orbit", nil }
+	t.Cleanup(func() { executable = os.Executable })
+	got := SpawnArgs("claude")
+	if got == "" {
+		t.Fatal("no spawn args for a HOME with a space")
+	}
+	want := " --settings '" + filepath.Join(home, ".cache", "orbit", "hooks", "claude.json") + "'"
+	if got != want {
+		t.Errorf("SpawnArgs = %q, want %q", got, want)
+	}
+}
+
+// The SessionStart subscription is what overwrites a dead run's claim, but it
+// must not fire on compaction, which happens mid-turn — hence the matcher.
+func TestSessionStartIsMatcherLimited(t *testing.T) {
+	b := ClaudeSettings("/opt/homebrew/bin/orbit")
+	var cfg struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Hooks["SessionStart"][0].Matcher; got != "startup|resume|clear" {
+		t.Errorf("SessionStart matcher = %q — compact would set your_turn mid-work", got)
+	}
+	if got := cfg.Hooks["Stop"][0].Matcher; got != "" {
+		t.Errorf("Stop grew a matcher: %q", got)
+	}
+}
+
+// A `go run` binary is deleted the moment the run exits; baking its path into
+// a file real sessions read at startup would leave them invoking a ghost.
+func TestSpawnArgsRefusesATempBinary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	executable = func() (string, error) { return filepath.Join(os.TempDir(), "go-build123", "orbit"), nil }
+	t.Cleanup(func() { executable = os.Executable })
+	if got := SpawnArgs("claude"); got != "" {
+		t.Errorf("SpawnArgs = %q for a temp-dir binary, want empty", got)
 	}
 }

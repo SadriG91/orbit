@@ -143,11 +143,16 @@ func TestSnapshotCopies(t *testing.T) {
 
 func plantHook(t *testing.T, agent, id string, status hooks.Status, at time.Time) {
 	t.Helper()
+	plant(t, agent, id, hooks.State{Status: status, Event: "test", At: at})
+}
+
+func plant(t *testing.T, agent, id string, st hooks.State) {
+	t.Helper()
 	dir := filepath.Join(os.Getenv("HOME"), ".cache", "orbit", "state")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(hooks.State{Status: status, Event: "test", At: at})
+	b, _ := json.Marshal(st)
 	if err := os.WriteFile(filepath.Join(dir, agent+"-"+id+".json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +242,7 @@ func TestResolveCopilotWorkingGoesSoft(t *testing.T) {
 	now := time.Now()
 
 	fresh := liveSession(Copilot, HintMaybeApproval, now.Add(-5*time.Second))
-	plantHook(t, "copilot", fresh.ID, hooks.Working, now.Add(-5*time.Second))
+	plant(t, "copilot", fresh.ID, hooks.State{Status: hooks.Working, Soft: true, At: now.Add(-5 * time.Second)})
 	fresh.Resolve(now)
 	if fresh.State != Working {
 		t.Errorf("fresh copilot working = %v, want Working", fresh.State)
@@ -245,7 +250,7 @@ func TestResolveCopilotWorkingGoesSoft(t *testing.T) {
 
 	sitting := liveSession(Copilot, HintMaybeApproval, now.Add(-30*time.Second))
 	sitting.ID = "hooked-2"
-	plantHook(t, "copilot", sitting.ID, hooks.Working, now.Add(-30*time.Second))
+	plant(t, "copilot", sitting.ID, hooks.State{Status: hooks.Working, Soft: true, At: now.Add(-30 * time.Second)})
 	sitting.Resolve(now)
 	if sitting.State != NeedsApproval {
 		t.Errorf("sitting copilot working = %v, want the inference to take over", sitting.State)
@@ -264,5 +269,53 @@ func TestResolveHookStateNeverRevivesADeadAgent(t *testing.T) {
 	s.Resolve(now)
 	if s.State != ShellOnly {
 		t.Errorf("state = %v, want ShellOnly regardless of hook state", s.State)
+	}
+}
+
+// A lost Stop event must not pin "working" forever. The transcript's HintDone
+// means a finished turn was written — a definite fact that contradicts the
+// file — so the inference takes over, which is the self-correction the old
+// path always had.
+func TestResolveLostStopFallsBackToTheTranscript(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := liveSession(Claude, HintDone, now.Add(-10*time.Second))
+	plantHook(t, "claude", s.ID, hooks.Working, now.Add(-15*time.Second))
+
+	s.Resolve(now)
+	if s.State != YourTurn {
+		t.Errorf("state = %v, want YourTurn — the transcript finished the turn the hook missed", s.State)
+	}
+}
+
+// HintApproval is codex's explicit approval marker in the transcript; a hook
+// Working claim (codex's PermissionRequest is unverified) must not override
+// something that definite.
+func TestResolveHintApprovalBeatsHookWorking(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := liveSession(Codex, HintApproval, now.Add(-5*time.Second))
+	plantHook(t, "codex", s.ID, hooks.Working, now.Add(-5*time.Second))
+
+	s.Resolve(now)
+	if s.State != NeedsApproval {
+		t.Errorf("state = %v, want NeedsApproval from the transcript's definite marker", s.State)
+	}
+}
+
+// The softness judgement travels in the State — Resolve must not need to
+// know which agent wrote it. A soft claude entry would decay identically.
+func TestResolveSoftDecayIsAgentBlind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := liveSession(Claude, HintMaybeApproval, now.Add(-30*time.Second))
+	plant(t, "claude", s.ID, hooks.State{Status: hooks.Working, Soft: true, At: now.Add(-30 * time.Second)})
+
+	s.Resolve(now)
+	if s.State != NeedsApproval {
+		t.Errorf("state = %v — a sitting soft Working should hand back to inference regardless of agent", s.State)
 	}
 }
