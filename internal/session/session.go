@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/tmux"
 )
 
@@ -188,6 +189,27 @@ func (s *Session) Resolve(now time.Time) {
 		s.State = ShellOnly
 		return
 	}
+
+	// The agent's own word beats inference. Sessions orbit spawns carry a
+	// hook that reports state as it changes — PermissionRequest fires the
+	// same second the prompt is drawn — where the transcript cannot say at
+	// all: its last word during any tool call is a call without a result,
+	// whether the tool is running or a prompt has been sitting for a minute.
+	// Guessing from stillness gets that wrong about one time in nine.
+	if st, ok := hooks.Load(s.Agent.String(), s.ID); ok && s.hookTrusted(st, now) {
+		switch st.Status {
+		case hooks.NeedsYou:
+			s.State = NeedsApproval
+			return
+		case hooks.YourTurn:
+			s.State = YourTurn
+			return
+		case hooks.Working:
+			s.State = Working
+			return
+		}
+	}
+
 	switch s.hint {
 	case HintDone:
 		s.State = YourTurn
@@ -204,6 +226,31 @@ func (s *Session) Resolve(now time.Time) {
 	default:
 		s.State = Working
 	}
+}
+
+// hookTrusted decides whether a recorded hook state still speaks for this
+// session.
+//
+// The transcript moving on past the state file means the hooks are not
+// reporting for this run — a session resumed by hand, without orbit's
+// injection, keeps writing its transcript while the old state file just
+// sits there claiming whatever was true last time. The margin absorbs the
+// write-behind the transcripts are documented to have.
+//
+// Copilot gets one more condition: it has no approval event, so its Working
+// entries only mean "a tool started", which is exactly the ambiguous state.
+// Fresh, that is fine — a prompt needs a beat to matter — but a copilot
+// Working left sitting has to fall back to the stillness inference or a
+// parked approval there would read as Working forever, which is the very
+// bug this package exists to end.
+func (s *Session) hookTrusted(st hooks.State, now time.Time) bool {
+	if s.Modified.After(st.At.Add(30 * time.Second)) {
+		return false
+	}
+	if s.Agent == Copilot && st.Status == hooks.Working && now.Sub(st.At) > 12*time.Second {
+		return false
+	}
+	return true
 }
 
 type SortMode int

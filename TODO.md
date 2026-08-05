@@ -50,6 +50,16 @@ practice, and switching it off guarantees never learning anything.
 
 ## 1. Get session state from hooks instead of inferring it
 
+**Status: the Claude path is built and verified end to end** — `orbit hook`
+subcommand, per-spawn `--settings` injection, state files under
+`~/.cache/orbit/state/`, `Resolve` preferring them with the staleness guard,
+pruning. A live run showed `needs_you` in the same sample the prompt hit the
+screen, `working` after approval, `your_turn` at Stop, and the file removed at
+SessionEnd. Remaining: codex injection (`-c` inline plus the one-time `/hooks`
+trust approval UX), the copilot install decision (global file, needs consent
+and an uninstall; test the PascalCase aliases live first), and the title
+fallback for unhooked sessions.
+
 **The signal orbit exists to provide is wrong about 1 in 9 times.** Measured
 over 8,327 real tool calls in local transcripts:
 

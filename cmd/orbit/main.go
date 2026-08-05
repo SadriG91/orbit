@@ -12,6 +12,7 @@ import (
 
 	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/debug"
+	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/term"
 	"github.com/sadrig91/orbit/internal/tmux"
 	"github.com/sadrig91/orbit/internal/ui"
@@ -21,6 +22,23 @@ import (
 var version = "dev"
 
 func main() {
+	// `orbit hook <agent> <event>` — the hidden subcommand the agents' hook
+	// systems call, dispatched before flags, config, tmux checks, anything.
+	// It runs inside the agent's own loop, and on copilot a non-zero exit
+	// denies the user's tool call outright — so this path must reach exit 0
+	// whatever happens, panic included, and must write nothing to stdout,
+	// which several hook events read as instructions.
+	// The word alone claims the invocation, however mangled the rest is: a
+	// truncated argv falling through to the normal CLI would exit non-zero,
+	// and on copilot that denies the tool call.
+	if len(os.Args) >= 2 && os.Args[1] == "hook" {
+		defer func() { recover(); os.Exit(0) }() //nolint:errcheck // exit 0 is the contract
+		if len(os.Args) >= 4 {
+			hooks.Run(os.Args[2], os.Args[3], os.Stdin)
+		}
+		return
+	}
+
 	var (
 		window      = flag.Bool("window", false, "attach sessions in a new Ghostty window instead of a tab")
 		inline      = flag.Bool("inline", false, "attach in this terminal instead of spawning a tab")

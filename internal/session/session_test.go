@@ -1,6 +1,8 @@
 package session
 
 import (
+	"encoding/json"
+	"github.com/sadrig91/orbit/internal/hooks"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,5 +138,131 @@ func TestSnapshotCopies(t *testing.T) {
 	got[0].State = NeedsApproval
 	if orig.State == NeedsApproval {
 		t.Error("writing to the snapshot mutated the cached session")
+	}
+}
+
+func plantHook(t *testing.T, agent, id string, status hooks.Status, at time.Time) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("HOME"), ".cache", "orbit", "state")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(hooks.State{Status: status, Event: "test", At: at})
+	if err := os.WriteFile(filepath.Join(dir, agent+"-"+id+".json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func liveSession(ag Agent, hint Hint, modified time.Time) *Session {
+	return &Session{
+		Agent: ag, ID: "hooked-1", hint: hint, Modified: modified,
+		Tmux: &tmux.Session{Name: "x", AgentRunning: true},
+	}
+}
+
+// The 1-in-9 fix. A tool that runs past 12 seconds used to read as "needs
+// you" for its whole duration, because a running tool and a parked prompt
+// write the same nothing to the transcript. The hook knows the difference: a
+// prompt would have fired PermissionRequest, so a Working entry during a
+// long tool call means exactly what it says.
+func TestResolveHookWorkingOutlivesTheTwelveSecondGuess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := liveSession(Claude, HintMaybeApproval, now.Add(-90*time.Second))
+	plantHook(t, "claude", s.ID, hooks.Working, now.Add(-90*time.Second))
+
+	s.Resolve(now)
+	if s.State != Working {
+		t.Errorf("state = %v, want Working — the hook said so and no prompt event followed", s.State)
+	}
+
+	// Without the hook, the same session reads as needing you: the old guess.
+	bare := liveSession(Claude, HintMaybeApproval, now.Add(-90*time.Second))
+	bare.ID = "unhooked-1"
+	bare.Resolve(now)
+	if bare.State != NeedsApproval {
+		t.Fatalf("the inference fallback changed underneath this test: %v", bare.State)
+	}
+}
+
+// And the converse: a prompt reads as needing you the moment it exists, not
+// twelve seconds later.
+func TestResolveHookNeedsYouIsImmediate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := liveSession(Claude, HintMaybeApproval, now.Add(-1*time.Second))
+	plantHook(t, "claude", s.ID, hooks.NeedsYou, now)
+
+	s.Resolve(now)
+	if s.State != NeedsApproval {
+		t.Errorf("state = %v, want NeedsApproval with zero wait", s.State)
+	}
+}
+
+func TestResolveHookYourTurn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+	s := liveSession(Claude, HintBusy, now)
+	plantHook(t, "claude", s.ID, hooks.YourTurn, now)
+	s.Resolve(now)
+	if s.State != YourTurn {
+		t.Errorf("state = %v, want YourTurn", s.State)
+	}
+}
+
+// A session resumed by hand carries no hooks, but its old state file is still
+// there, claiming whatever was true last run. The transcript moving on past
+// the file is how that gets noticed.
+func TestResolveIgnoresAStateFileTheTranscriptHasOutrun(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := liveSession(Claude, HintDone, now)
+	plantHook(t, "claude", s.ID, hooks.NeedsYou, now.Add(-10*time.Minute))
+
+	s.Resolve(now)
+	if s.State != YourTurn {
+		t.Errorf("state = %v, want the transcript's YourTurn — the hook state is from a previous run", s.State)
+	}
+}
+
+// Copilot has no approval event, so its Working entries only mean "a tool
+// started" — which is the ambiguous state. Fresh they are fine; sitting, they
+// must hand back to the stillness inference or a parked approval would read
+// as Working forever.
+func TestResolveCopilotWorkingGoesSoft(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	fresh := liveSession(Copilot, HintMaybeApproval, now.Add(-5*time.Second))
+	plantHook(t, "copilot", fresh.ID, hooks.Working, now.Add(-5*time.Second))
+	fresh.Resolve(now)
+	if fresh.State != Working {
+		t.Errorf("fresh copilot working = %v, want Working", fresh.State)
+	}
+
+	sitting := liveSession(Copilot, HintMaybeApproval, now.Add(-30*time.Second))
+	sitting.ID = "hooked-2"
+	plantHook(t, "copilot", sitting.ID, hooks.Working, now.Add(-30*time.Second))
+	sitting.Resolve(now)
+	if sitting.State != NeedsApproval {
+		t.Errorf("sitting copilot working = %v, want the inference to take over", sitting.State)
+	}
+}
+
+// Hook state speaks only for a running agent. A dead pane is a dead pane.
+func TestResolveHookStateNeverRevivesADeadAgent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := liveSession(Claude, HintBusy, now)
+	s.Tmux.AgentRunning = false
+	plantHook(t, "claude", s.ID, hooks.NeedsYou, now)
+
+	s.Resolve(now)
+	if s.State != ShellOnly {
+		t.Errorf("state = %v, want ShellOnly regardless of hook state", s.State)
 	}
 }

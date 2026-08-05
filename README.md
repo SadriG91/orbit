@@ -212,11 +212,17 @@ Each row also carries the session's token usage, read from whatever the agent
 recorded — Claude's per-message `usage`, Codex's `total_token_usage`, Copilot's
 `assistant_usage_events` table. `o` sorts by it.
 
-State comes from joining each agent's own transcript with live tmux facts. For
-Claude and Codex that's precise enough to tell "running a slow tool" apart from
-"waiting on approval" — an unanswered tool call that stops advancing is a
-permission prompt. Copilot keeps a database rather than an event stream, so its
-live states are coarser.
+State comes from the agent itself where possible. Sessions orbit starts carry
+a hook — injected per invocation, nothing written into your config — that
+reports each change as it happens, so a permission prompt shows as ▲ the
+second it is drawn rather than after a heuristic delay. Claude sessions have
+this today; codex and copilot are on the older path.
+
+Everything else falls back to joining the transcript with live tmux facts: an
+unanswered tool call that stops advancing reads as a permission prompt. That
+guess is right for prompts and wrong for slow tools, which is exactly why the
+hooks exist. Copilot keeps a database rather than an event stream, so its
+fallback states are coarser still.
 
 ## How it works
 
@@ -277,6 +283,7 @@ internal/
   tmux/             the private tmux server; knows nothing about agents
   term/             Ghostty and iTerm2: opening tabs, focusing them back
   search/           full-text search over transcript bodies
+  hooks/            agent hook events -> per-session state; `orbit hook`
   summary/          cached, incrementally-updated summaries
   update/           the once-a-day release check and self-update
 scripts/            checks that need a real terminal, not a test runner

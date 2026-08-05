@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/pane"
 	"github.com/sadrig91/orbit/internal/search"
 	"github.com/sadrig91/orbit/internal/session"
@@ -574,6 +575,9 @@ func (m *Model) pruneCmd() tea.Cmd {
 	all := snapshot(m.all)
 	return func() tea.Msg {
 		summary.Prune(all)
+		// Hook state files too: SessionEnd removes them properly, this
+		// catches sessions that never got one — a killed agent, a crash.
+		hooks.Prune(7 * 24 * time.Hour)
 		return nil
 	}
 }
