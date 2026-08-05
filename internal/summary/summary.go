@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,7 +134,7 @@ func Generate(s *session.Session, cfg config.Summary) (Record, error) {
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return Record{}, err
+		return Record{}, commandError(ctx, argv[0], err)
 	}
 
 	text := strings.TrimSpace(string(out))
@@ -177,6 +178,39 @@ func buildPrompt(s *session.Session, budget int) (string, int, error) {
 type summaryError string
 
 func (e summaryError) Error() string { return string(e) }
+
+// commandError reports what the CLI actually complained about.
+//
+// exec gives back "exit status 1" and keeps stderr on the error value, so
+// every way a summariser can fail for a nameable reason — a model the account
+// isn't allowed to use, an expired login, a flag the installed version doesn't
+// have — arrived at the status line as a number. The default codex command
+// spent a long time rejected by ChatGPT-account logins without that ever being
+// visible, which is the whole argument for this function.
+func commandError(ctx context.Context, name string, err error) error {
+	if ctx.Err() != nil {
+		return summaryError(name + ": timed out")
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if msg := lastLine(ee.Stderr); msg != "" {
+			return summaryError(name + ": " + msg)
+		}
+	}
+	return summaryError(name + ": " + err.Error())
+}
+
+// lastLine picks the final non-empty line of a CLI's stderr, which is where
+// the error itself tends to be — after whatever warnings preceded it.
+func lastLine(b []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if s := strings.TrimSpace(lines[i]); s != "" {
+			return format.Truncate(s, 200)
+		}
+	}
+	return ""
+}
 
 const (
 	errNoCommand    = summaryError("no summary command configured for this provider")
