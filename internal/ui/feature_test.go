@@ -203,18 +203,112 @@ func TestAutoSummariseGuardsSpending(t *testing.T) {
 	}
 }
 
-// A poll result that arrives after the stream is up must not overwrite it.
-// capture-pane is issued alongside the dial so the pane isn't blank while
-// connecting, and that reply can land late — painting it over live output
-// would make the preview jump backwards in time.
-func TestStalePollDoesNotOverwriteTheStream(t *testing.T) {
-	m := New(config.Config{}, "", "test")
-	m.preview, m.previewName = "live output", "cl-work-1"
+// fakePane stands in for a control client so the paths that matter — a
+// connection that dies — can be exercised without a tmux server.
+type fakePane struct {
+	session string
+	text    string
+	dirty   chan struct{}
+	done    chan struct{}
+	closed  bool
+}
 
-	// No stream yet: a poll is the only source, so it wins.
+func newFakePane(session string) *fakePane {
+	return &fakePane{
+		session: session,
+		text:    "live output",
+		dirty:   make(chan struct{}, 1),
+		done:    make(chan struct{}),
+	}
+}
+
+func (f *fakePane) Session() string        { return f.session }
+func (f *fakePane) Text() string           { return f.text }
+func (f *fakePane) Switch(s string) error  { f.session = s; return nil }
+func (f *fakePane) Dirty() <-chan struct{} { return f.dirty }
+func (f *fakePane) Done() <-chan struct{}  { return f.done }
+func (f *fakePane) Close() error           { f.closed = true; return nil }
+func (f *fakePane) die()                   { close(f.done) }
+
+// Before a stream is up, a poll is the only source of a preview and must fill
+// the gap — capture-pane is issued alongside the dial precisely so the pane
+// isn't blank while connecting.
+func TestPollFillsTheGapBeforeTheStreamIsUp(t *testing.T) {
+	m := New(config.Config{}, "", "test")
 	m.Update(previewMsg{name: "cl-work-1", text: "polled"})
 	if m.preview != "polled" {
 		t.Errorf("preview = %q, want the poll to fill the gap", m.preview)
+	}
+}
+
+// …but once the stream is up that same poll can still land, and painting a
+// stale capture over live output would make the preview jump backwards in
+// time. This is the guard the previous version of this test claimed to cover
+// and did not.
+func TestStalePollDoesNotOverwriteTheStream(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	f := newFakePane("cl-work-1")
+	m.stream = f
+	m.preview, m.previewName = "live output", "cl-work-1"
+
+	m.Update(previewMsg{name: "cl-work-1", text: "stale poll"})
+	if m.preview != "live output" {
+		t.Errorf("preview = %q, want the stream to win", m.preview)
+	}
+
+	// A poll for a different session is not stale — it is the only source for
+	// one the stream is not watching, so it must still land.
+	m.Update(previewMsg{name: "cl-other", text: "polled"})
+	if m.preview != "polled" {
+		t.Errorf("preview = %q, want a poll for another session to land", m.preview)
+	}
+}
+
+// A control client that dies sends one last wakeup and then nothing. Waiting
+// only on Dirty would block forever on a screen that cannot move, and because
+// the Model still held a stream, capture would never fall back to polling —
+// the preview frozen on its last frame for the rest of the session, silently.
+func TestDeadStreamFallsBackToPolling(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	f := newFakePane("cl-work-1")
+	m.stream = f
+	m.view = []*session.Session{{Tmux: &tmux.Session{Name: "cl-work-1"}}}
+	m.cursor = 0
+
+	// The wait has to notice death rather than hanging on Dirty.
+	f.die()
+	msg := waitForPaneCmd(f)()
+	if _, ok := msg.(paneGoneMsg); !ok {
+		t.Fatalf("a dead pane produced %T, want paneGoneMsg", msg)
+	}
+
+	m.Update(msg)
+	if m.stream != nil {
+		t.Error("the dead stream was kept")
+	}
+	if !f.closed {
+		t.Error("the dead stream was dropped without being closed")
+	}
+	// The last screen it managed stays up rather than the pane going blank.
+	if m.preview != "live output" {
+		t.Errorf("preview = %q, want the last frame kept", m.preview)
+	}
+	// And polling resumes, which it could not while a stream was held.
+	cmd := m.capture()
+	if cmd == nil {
+		t.Fatal("no capture after the stream died")
+	}
+	if _, ok := cmd().(previewMsg); !ok && !m.streamOpening {
+		t.Error("capture neither polled nor redialled after the stream died")
+	}
+}
+
+// A live pane must not be mistaken for a dead one.
+func TestLiveStreamKeepsWaiting(t *testing.T) {
+	f := newFakePane("cl-work-1")
+	f.dirty <- struct{}{}
+	if _, ok := waitForPaneCmd(f)().(paneDirtyMsg); !ok {
+		t.Error("a live pane did not report a screen change")
 	}
 }
 

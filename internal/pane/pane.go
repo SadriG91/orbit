@@ -58,6 +58,15 @@ func Open(session string) (*Pane, error) {
 // between samples the way it is with capture-pane.
 func (p *Pane) Dirty() <-chan struct{} { return p.dirty }
 
+// Done is closed once the pane will never change again — the control client
+// exited, or Close was called.
+//
+// Anything waiting on Dirty has to wait on this too. A dead connection sends
+// one last wakeup and then nothing, so a reader watching only Dirty blocks on a
+// screen that can no longer move, and the caller goes on believing it has a
+// live stream when it has a corpse.
+func (p *Pane) Done() <-chan struct{} { return p.done }
+
 // Session is what the pane is currently showing.
 func (p *Pane) Session() string {
 	p.mu.Lock()
@@ -186,7 +195,11 @@ func (p *Pane) pump() {
 			p.markDirty()
 		}
 	}
-	p.markDirty() // a closed connection is itself a change worth showing
+	// The connection has ended. Show the last screen it managed, then say so —
+	// in that order, since a reader selecting on both should be able to take
+	// the final state whichever branch it happens to pick.
+	p.markDirty()
+	p.once.Do(func() { close(p.done) })
 }
 
 // write is separated from pump so the emulator and the dirty signalling can be
