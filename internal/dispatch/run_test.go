@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,18 @@ func fakeAgent(t *testing.T, agent, script string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// blockRecordDir puts a plain file where the record directory should be, so
+// every write into it fails.
+func blockRecordDir(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(Dir()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Dir(), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newRecord(t *testing.T, agent string) *Record {
@@ -437,5 +450,113 @@ func TestFinishPrefersTheStreamOverTheContext(t *testing.T) {
 				t.Errorf("status = %q err = %q, want %q / %q", r.Status, r.Err, tt.wantStatus, tt.wantErr)
 			}
 		})
+	}
+}
+
+// A CLI that dies before reading the prompt breaks the pipe under the write.
+// The broken pipe is the symptom; what it printed on the way out is the cause,
+// and reporting EPIPE instead of that loses the only actionable thing there is.
+func TestRunPrefersTheCLIsComplaintOverABrokenPipe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeAgent(t, "claude", `
+echo "not logged in — run claude auth login" >&2
+exit 1
+`)
+	rec := newRecord(t, "claude")
+	var log bytes.Buffer
+	if err := Run(context.Background(), rec, Options{Timeout: 30 * time.Second}, &log); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rec.Status != Failed {
+		t.Fatalf("status = %q, want %q", rec.Status, Failed)
+	}
+	if rec.Err != "not logged in — run claude auth login" {
+		t.Errorf("err = %q, want the CLI's complaint, not the pipe error", rec.Err)
+	}
+	if strings.Contains(rec.Err, "broken pipe") || strings.Contains(rec.Err, "send prompt") {
+		t.Errorf("err = %q leaked the symptom", rec.Err)
+	}
+}
+
+// And a CLI that exits 0 without reading the prompt did no work; recording
+// that as a success would put a "your turn" on a conversation that never
+// happened.
+func TestRunDoesNotCallAnEmptyExitSuccess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeAgent(t, "claude", "exit 0")
+	rec := newRecord(t, "claude")
+	if err := Run(context.Background(), rec, Options{Timeout: 30 * time.Second}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rec.Status != Failed {
+		t.Errorf("status = %q, want %q", rec.Status, Failed)
+	}
+	if !strings.Contains(rec.Err, "without starting a turn") {
+		t.Errorf("err = %q, want it to say no turn happened", rec.Err)
+	}
+}
+
+// The terminal record is the last thing written about a run: if it does not
+// land, the dashboard keeps showing whatever the previous one said. That has
+// to reach the caller rather than exiting 0 on an unrecorded outcome — unlike
+// the progress saves, which are corrected by the next event.
+func TestTerminalSaveFailureIsReported(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// A file where the record directory should be: every write into it fails.
+	blockRecordDir(t)
+
+	var log bytes.Buffer
+	r := newRecord(t, "claude")
+	err := finish(context.Background(), r, result{done: true}, nil, "",
+		func(f string, a ...any) { fmt.Fprintf(&log, f+"\n", a...) })
+	if err == nil {
+		t.Fatal("finish reported success though the record could not be written")
+	}
+	if !strings.Contains(log.String(), "could not record the outcome") {
+		t.Errorf("nothing said about it in the log:\n%s", log.String())
+	}
+
+	// The handoff path is the one where silence would hurt most: a session
+	// waiting for a person that nothing tells anyone about.
+	if err := finish(context.Background(), r, result{handedTo: "Bash: rm -rf x"}, nil, "",
+		func(string, ...any) {}); err == nil {
+		t.Error("a handoff whose record could not be written reported success")
+	}
+}
+
+// Progress saves are the opposite call: the agent is doing real work in
+// someone's repository, and killing it because a cache file could not be
+// written would destroy more than it protects. But it is said out loud.
+func TestProgressSaveFailureNarratesAndCarriesOn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	blockRecordDir(t)
+	fakeAgent(t, "claude", `
+read -r prompt
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"go build ./..."}}]}}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"go test ./..."}}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"green"}'
+while read -r more; do :; done
+`)
+	var log bytes.Buffer
+	rec := newRecord(t, "claude")
+	// The terminal save fails too, so Run reports it — the point here is what
+	// happened on the way, not the return value.
+	Run(context.Background(), rec, Options{Timeout: 30 * time.Second}, &log) //nolint:errcheck
+
+	out := log.String()
+	if !strings.Contains(out, "could not record") {
+		t.Errorf("a save failure went unmentioned:\n%s", out)
+	}
+	if n := strings.Count(out, "could not record progress"); n > 1 {
+		t.Errorf("the same complaint was repeated %d times; once is enough:\n%s", n, out)
+	}
+	// The run itself must have carried on to the end.
+	if !strings.Contains(out, "go test ./...") {
+		t.Errorf("the run stopped at the first failed save:\n%s", out)
+	}
+	if rec.Status != Done {
+		t.Errorf("status = %q, want the run to have completed anyway", rec.Status)
 	}
 }

@@ -110,9 +110,21 @@ func Run(ctx context.Context, r *Record, opts Options, narrate io.Writer) error 
 	w := &syncWriter{w: stdin}
 	if r.Agent == "claude" {
 		if _, err := w.Write(claudeInput(r.Prompt)); err != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-			return fmt.Errorf("send prompt: %w", err)
+			// A failed write here almost always means the CLI already exited —
+			// not logged in, a rejected flag — and the pipe broke under us. The
+			// broken pipe is the symptom; the complaint the CLI printed on its
+			// way out is the cause, so this goes through the same reconciliation
+			// as any other failure rather than reporting EPIPE and losing it.
+			w.Close()
+			io.Copy(io.Discard, stdout) //nolint:errcheck // draining a dead child
+			waitErr := cmd.Wait()
+			if waitErr == nil {
+				// It exited cleanly without reading the prompt, which is not a
+				// thing any of these CLIs should do; say so plainly rather than
+				// recording a success that did no work.
+				waitErr = fmt.Errorf("%s exited before reading the prompt", r.Agent)
+			}
+			return finish(ctx, r, result{}, waitErr, stderr.String(), say)
 		}
 	} else {
 		stdin.Close()
@@ -144,12 +156,32 @@ type result struct {
 	done     bool
 	handedTo string // the tool call the run was handed back on, if any
 	err      string
+	// saw records whether the stream said anything at all. A run that emitted
+	// no events did no work, whatever its exit code, and must not be filed as
+	// finished — see the default case in finish.
+	saw bool
 }
 
 // consume reads the agent's stream until it says the turn is over, updating
 // the record as it goes. It stops at the terminal event rather than at EOF —
 // see the shutdown comment in Run for why there may not be one.
 func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(string, ...any)) result {
+	// Progress saves are best-effort, and deliberately do not end the run. The
+	// agent is doing real work in someone's repository; aborting it because a
+	// file in orbit's cache could not be written would destroy more than it
+	// protects. But a record that is not being written means a dashboard that
+	// cannot see the run, so the first failure is said out loud — and the
+	// terminal save in finish does return its error, because that one decides
+	// what the session looks like from then on.
+	saved := true
+	save := func(what string) {
+		if err := Save(r); err != nil && saved {
+			saved = false
+			say("  (orbit could not record %s: %v — the run continues, but the "+
+				"dashboard will not see it)", what, err)
+		}
+	}
+
 	parse := parserFor(r.Agent)
 	sc := bufio.NewScanner(stdout)
 	// Agent events carry whole assistant messages and tool inputs; the default
@@ -164,6 +196,7 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 		if !ok {
 			continue
 		}
+		res.saw = true
 		// Both CLIs report the same thing twice, in different ways, and saying
 		// it twice reads like the run did it twice. Claude's final assistant
 		// message and its result event carry identical text; codex emits
@@ -185,7 +218,7 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 			if opts.Link != nil {
 				opts.Link(st.sessionID)
 			}
-			Save(r)
+			save("the session id")
 		}
 
 		switch {
@@ -203,7 +236,7 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 			w.Write(claudeHandoff(st.ask.requestID))
 			res.handedTo = st.ask.detail
 			r.Status, r.Pending, r.Activity = NeedsYou, st.ask.detail, ""
-			Save(r)
+			save("the handoff")
 
 		case st.err != "":
 			res.err = st.err
@@ -228,7 +261,7 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 			// worth reading.
 			if r.Status == Running {
 				r.Activity = st.activity
-				Save(r)
+				save("progress")
 			}
 
 		case st.note != "":
@@ -255,14 +288,23 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 // its point of view the turn was interrupted. From orbit's it did exactly what
 // it was told. The stream is therefore believed first, and the exit code only
 // consulted when the stream said nothing conclusive.
+//
+// This save is the one that must not fail quietly. The progress saves in
+// consume can be missed and corrected by the next event, but this record is
+// the last thing written about the run: if it does not land, the dashboard
+// keeps showing whatever the previous one said — a handoff nobody is told
+// about, or a dot spinning on a process that has exited. So the error is
+// returned, and the caller reports it rather than exiting 0 on a run whose
+// outcome was never recorded.
 func finish(ctx context.Context, r *Record, res result, waitErr error, stderr string, say func(string, ...any)) error {
 	r.Ended = time.Now()
 
 	switch {
 	case res.handedTo != "":
 		r.Status, r.Pending = NeedsYou, res.handedTo
-		Save(r)
-		return nil
+		say("")
+		say("▲ handed back — ⏎ in orbit takes it over")
+		return saveTerminal(r, say)
 
 	case res.err != "":
 		r.Status, r.Err = Failed, res.err
@@ -286,11 +328,18 @@ func finish(ctx context.Context, r *Record, res result, waitErr error, stderr st
 		// anything to say. Its stderr is the only account of why.
 		r.Status, r.Err = Failed, firstProblem(stderr, waitErr)
 
-	default:
-		// The stream ended cleanly without a terminal event. Nothing is
-		// obviously wrong and the transcript is there to resume, so this is
-		// reported as finished rather than invented as a failure.
+	case res.saw:
+		// The stream ended without a terminal event, but it did say things
+		// along the way. Nothing is obviously wrong and the transcript is there
+		// to resume, so this is reported as finished rather than invented as a
+		// failure.
 		r.Status = Done
+
+	default:
+		// Not one event, and a clean exit. Whatever that is, it is not a turn:
+		// filing it as done would put a "your turn" on a conversation that
+		// never happened.
+		r.Status, r.Err = Failed, r.Agent+" exited without starting a turn"
 	}
 
 	if r.Status == Failed {
@@ -300,8 +349,16 @@ func finish(ctx context.Context, r *Record, res result, waitErr error, stderr st
 		say("")
 		say("◆ done — ⏎ in orbit resumes it")
 	}
-	Save(r)
-	return nil
+	return saveTerminal(r, say)
+}
+
+// saveTerminal writes the record that will speak for this run from now on.
+func saveTerminal(r *Record, say func(string, ...any)) error {
+	err := Save(r)
+	if err != nil {
+		say("✗ orbit could not record the outcome of this run: %v", err)
+	}
+	return err
 }
 
 // firstProblem picks the most useful line of a failed CLI's stderr, falling

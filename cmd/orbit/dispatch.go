@@ -60,9 +60,17 @@ func runDispatch(id string) int {
 		Link: func(sessionID string) { tmux.Link(rec.Tmux, sessionID) },
 	}, out)
 
+	failed := err != nil
 	if err != nil {
-		rec.Status, rec.Err, rec.Ended = dispatch.Failed, err.Error(), time.Now()
-		dispatch.Save(rec)
+		// Run reached a verdict of its own for everything except the errors it
+		// refuses outright (an unknown agent, copilot without consent) and a
+		// terminal record that would not write. Overwriting a status it already
+		// decided would relabel a run that finished as one that failed, so the
+		// record is only rewritten when it is still claiming to be running.
+		if rec.Live() {
+			rec.Status, rec.Err, rec.Ended = dispatch.Failed, err.Error(), time.Now()
+			dispatch.Save(rec) //nolint:errcheck // already failing; the log below is the report
+		}
 		fmt.Fprintln(out, "\n✗ "+err.Error())
 		if errors.Is(err, dispatch.ErrCopilotConsent) {
 			fmt.Fprintln(out, "  set dispatch.copilot_allow_all_tools in "+config.Path())
@@ -81,7 +89,10 @@ func runDispatch(id string) int {
 	if rec.Tmux != "" {
 		tmux.Kill(rec.Tmux)
 	}
-	if rec.Status == dispatch.Failed {
+	// Non-zero for a run that failed *and* for one whose outcome could not be
+	// recorded: from anything watching this process, an unrecorded result is
+	// indistinguishable from no result.
+	if failed || rec.Status == dispatch.Failed {
 		return 1
 	}
 	return 0
