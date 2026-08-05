@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/tmux"
 )
@@ -317,5 +318,119 @@ func TestResolveSoftDecayIsAgentBlind(t *testing.T) {
 	s.Resolve(now)
 	if s.State != NeedsApproval {
 		t.Errorf("state = %v — a sitting soft Working should hand back to inference regardless of agent", s.State)
+	}
+}
+
+// A dispatch is not inference. orbit started the process and read the CLI's
+// own event stream, so its record outranks both the hook state files and the
+// transcript — and, unlike either, it has to be believed on a session with no
+// tmux at all, because a finished dispatch takes its pane with it.
+
+func dispatched(status dispatch.Status, ended time.Time) *dispatch.Record {
+	return &dispatch.Record{
+		ID: "d1", Agent: "claude", SessionID: "disp-1",
+		Status: status, Ended: ended,
+	}
+}
+
+func TestResolveDispatchStates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	tests := []struct {
+		name   string
+		status dispatch.Status
+		tmux   bool
+		want   State
+	}{
+		{"running with its runner alive", dispatch.Running, true, Working},
+		{"stopped at an approval", dispatch.NeedsYou, false, NeedsApproval},
+		// A dispatch that stopped is exactly the thing worth walking over to,
+		// and ▲ is how orbit says so — including the desktop notification.
+		{"failed", dispatch.Failed, false, NeedsApproval},
+		{"finished", dispatch.Done, false, YourTurn},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Session{Agent: Claude, ID: "disp-1", hint: HintBusy, Modified: now}
+			s.Dispatch = dispatched(tt.status, now)
+			if tt.tmux {
+				s.Tmux = &tmux.Session{Name: "x", AgentRunning: true}
+			}
+			s.Resolve(now)
+			if s.State != tt.want {
+				t.Errorf("state = %v, want %v", s.State, tt.want)
+			}
+		})
+	}
+}
+
+// The trap the hooks work already fell into once: killing a session SIGHUPs
+// whatever was inside it, so the runner never gets to write its own ending. A
+// record left saying "running" would spin a dot forever.
+func TestResolveDistrustsARunningDispatchWithNoRunner(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := &Session{Agent: Claude, ID: "disp-1", hint: HintDone, Modified: now}
+	s.Dispatch = dispatched(dispatch.Running, time.Time{})
+	s.Resolve(now)
+	if s.State != Dormant {
+		t.Errorf("state = %v, want Dormant — the runner lives in tmux and there is none", s.State)
+	}
+}
+
+// Resuming a dispatched session interactively is the intended next step. The
+// moment someone types into it, the record is describing a previous chapter.
+func TestResolveDropsADispatchTheConversationHasMovedPast(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+	ended := now.Add(-10 * time.Minute)
+
+	s := &Session{Agent: Claude, ID: "disp-1", hint: HintBusy, Modified: now}
+	s.Dispatch = dispatched(dispatch.NeedsYou, ended)
+	s.Tmux = &tmux.Session{Name: "x", AgentRunning: true}
+	s.Resolve(now)
+	if s.State != Working {
+		t.Errorf("state = %v, want Working from the transcript, not the stale record", s.State)
+	}
+
+	// Within the margin the record still speaks: the transcript's clock and
+	// orbit's are not the same clock.
+	fresh := &Session{Agent: Claude, ID: "disp-1", hint: HintBusy, Modified: now}
+	fresh.Dispatch = dispatched(dispatch.NeedsYou, now.Add(-5*time.Second))
+	fresh.Tmux = &tmux.Session{Name: "x", AgentRunning: true}
+	fresh.Resolve(now)
+	if fresh.State != NeedsApproval {
+		t.Errorf("state = %v, want NeedsApproval — the record only just finished", fresh.State)
+	}
+}
+
+// A finished dispatch has no tmux, and Dormant is what the tmux checks would
+// have said. Getting this wrong would hide every completed dispatch behind a
+// grey dot in the "not running" pile.
+func TestResolveDispatchOutranksTheTmuxChecks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+
+	s := &Session{Agent: Claude, ID: "disp-1", hint: HintBusy, Modified: now}
+	s.Dispatch = dispatched(dispatch.Done, now)
+	s.Resolve(now)
+	if s.State != YourTurn {
+		t.Errorf("state = %v, want YourTurn with no tmux at all", s.State)
+	}
+	if !s.Live() {
+		t.Error("a finished dispatch should stay pinned to the top of the list")
+	}
+}
+
+// And a session with no dispatch at all is untouched by any of this.
+func TestResolveWithoutADispatchIsUnchanged(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	now := time.Now()
+	s := liveSession(Claude, HintDone, now)
+	s.Resolve(now)
+	if s.State != YourTurn {
+		t.Errorf("state = %v, want YourTurn from the transcript", s.State)
 	}
 }

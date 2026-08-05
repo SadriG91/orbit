@@ -220,20 +220,27 @@ land.
 
 ## 2. Dispatch sessions over the CLIs' structured event streams
 
-For the `@codex look at feature X` idea. All three CLIs emit structured JSONL,
-verified by running each:
+**Status: built and verified end to end for all three agents.** `d` in the
+dashboard, an `orbit dispatch <id>` runner in a tmux pane on orbit's own
+server, records under `~/.cache/orbit/dispatch/`, `Session.Resolve` preferring
+them ahead of the tmux checks. A live run dispatched from the TUI created its
+file, reported ● then ◆, killed its own pane, and `⏎` resumed the conversation
+interactively. A second, forced to a real permission prompt, stopped at the
+approval and handed back.
+
+All three CLIs emit structured JSONL, verified by running each:
 
 | | flag | join key | turn end |
 |---|---|---|---|
 | Claude | `-p --output-format stream-json --verbose` | `session_id` in every event | result event |
 | Codex | `exec --json` | `thread_id` on `thread.started` | `turn.completed` (+`usage`) |
-| Copilot | `-p --output-format json` | inside `data` — needs confirming | `assistant.turn_end`, `assistant.idle` |
+| Copilot | `-p --output-format json` | `sessionId`, **only on the `result` event** — the docs' sample was misleading; `--session-id` makes it moot | `assistant.turn_end`, `assistant.idle` |
 
 Copilot's is the richest of the three: `user.message`, `assistant.turn_start`,
 `model.call_start`, `assistant.message_delta`, `assistant.turn_end`,
 `session.usage_checkpoint`, `assistant.idle`. The README's claim that copilot's
 live states are coarser is true of its database and the opposite of true of its
-CLI — worth correcting when this lands.
+CLI — since corrected.
 
 **Do not adopt the SDKs.** The Claude Agent SDK (checked the installed copy,
 v0.3.160) spawns `cli.js` and drives it with `--print --output-format
@@ -247,12 +254,95 @@ works for sessions orbit runs, non-interactively, with no TUI to attach to. It
 cannot see a session started in someone's own terminal. Hooks and dispatch are
 complementary; neither replaces the other.
 
-Worth verifying: dispatched sessions should stay resumable (`claude --resume`,
-`codex resume`) since these are the same binaries writing the same stores —
-dispatch headlessly, take over interactively later. And the approval events in
-stream mode were never observed, because the test runs passed
-`--allow-all-tools` and `--sandbox read-only` so nothing needed approval. Check
-that before relying on it.
+### The two open questions, answered by running them
+
+**Dispatched sessions stay resumable — all three.** A dispatched claude wrote
+the ordinary `~/.claude/projects/<slug>/<id>.jsonl`; `claude --resume <id>`
+recovered it non-interactively *and* interactively in tmux, replaying both
+turns, accepting a new prompt, and **appending to the same file with the same
+id — no fork**. `codex exec` writes a normal `rollout-*.jsonl` and `codex exec
+resume <thread_id>` kept the thread and its context. Copilot rows land in
+`session-store.db` with cwd and summary. So dispatch is a way to start work,
+not a separate kind of session.
+
+**Approval in stream mode exists for claude only, and only if you ask for it.**
+
+| | what a dispatched run does when a tool needs approval |
+|---|---|
+| Claude, default | **Nothing visible.** The tool is auto-denied — `tool_result` with `is_error`, `"This command requires approval"`, `tool_result_meta[].non_execution_kind: "user-rejected"`, and `permission_denials[]` on the final result — and the model talks its way around it. A silently worse answer. |
+| Claude, with `--input-format stream-json --permission-prompt-tool stdio` | `control_request{subtype:"can_use_tool", tool_name, input, tool_use_id, decision_reason, permission_suggestions}`, **0.01s after the `tool_use` event**, and the CLI blocks until answered. |
+| Codex | **No channel.** `-c approval_policy=on-request` changes nothing in `exec` mode: a sandbox refusal came back as a failed `command_execution` with exit 6 and the turn completed. `exec_approval_request` / `apply_patch_approval_request` exist only in `codex mcp-server` / `app-server` — JSON-RPC, experimental. |
+| Copilot | **No channel.** `--allow-all-tools` is documented as *required* for non-interactive mode. |
+
+So orbit always passes the flag, and always answers the same way: **deny with
+`interrupt: true`**. Measured, both ways — a plain deny let the model carry on
+and write four paragraphs about what it could not do; deny-with-interrupt ended
+the turn in the same tenth of a second, and `claude --resume` then opened on
+*"Ran 1 shell command ⎿ Interrupted · What should Claude do instead?"* with a
+live cursor. The run exits 1 with subtype `error_during_execution` and
+terminal_reason `aborted_streaming` afterwards; that is the expected shape of a
+handoff, not a failure, and `finish` treats it as such.
+
+### Two bugs the fake streams could not have found
+
+Both appeared on the first run against a real CLI, and both are now regression
+tests.
+
+**Claude does not close stdout when a turn ends.** With stream-json input it
+goes on waiting for another message, so reading to EOF before closing stdin
+waits for an ending that only closing stdin can cause. A run that did its work
+in eleven seconds hung for four minutes. `consume` now stops at the terminal
+event, `Run` closes stdin, then drains — stopping the read while the child
+still has something to say refills the pipe buffer and deadlocks from the other
+end.
+
+**The context outranked the stream.** With the hang above, the outer timeout
+fired and a completed run was written up as "cancelled". `finish` now believes
+the stream first: the context only says what happened to the process
+afterwards, and a run interrupted a moment after finishing its work still
+finished its work.
+
+### Deliberate choices worth not relitigating
+
+- **The runner lives in tmux**, as `orbit dispatch <id>`, not as a detached
+  process. That buys four things at once for no new machinery: it survives
+  quitting the dashboard, `x` kills it, the live preview shows it working, and
+  `tmux.List` already reports which session it belongs to.
+- **It kills its own pane when the run ends.** That is what makes a finished
+  dispatch resolve to ◆ and `⏎` resume the *conversation* rather than attach
+  you to a dead shell. A pane kept on failure and dropped on success would be a
+  worse rule to explain than one rule plus a log file.
+- **Only an id is typed into the shell.** The prompt is arbitrary user text and
+  `tmux.Spawn` types what it is given; the job is written to a record first.
+- **No permission mode, sandbox or approval policy is imposed.** The user's own
+  config decides, so a handoff means "your agent would have prompted here".
+  `dispatch.claude_permission_mode` overrides it for people who want an
+  unattended run held to a stricter one.
+- **A failed dispatch resolves to ▲, not a new state.** It is the thing worth
+  walking over to, and ▲ already carries the desktop notification. Adding a
+  Failed state would touch icons, labels, colours, sorting, the header pills
+  and notify, for a distinction the detail pane already makes.
+
+### Remaining
+
+- **Copilot's tool calls are only half-legible.** It has no "tool call started"
+  event; arguments stream as `assistant.tool_call_delta` fragments (`{"`,
+  `command`, `":"`, `echo`, ` OR`, `BIT`), so the dashboard shows the tool name
+  and not what it is doing. Reassembling the JSON across deltas would fix it.
+- **Copilot can hang.** A `-p` run doing a shell tool call sat four minutes and
+  had to be signalled, emitting `abort{user_initiated}` and
+  `assistant.idle{aborted:true}`. The timeout is the only thing that ends that
+  run; the cause was never found.
+- **Dispatch always starts a fresh conversation.** Following up on an existing
+  one headlessly — `claude --resume <id> -p …`, which works — would be a
+  genuinely useful second key, deliberately left out of the first cut rather
+  than overloaded onto `d`.
+- **Codex approvals would need the app-server.** `codex mcp-server` /
+  `app-server` speak JSON-RPC and do have `exec_approval_request`. That is the
+  move if a codex dispatch degrading silently turns out to matter, and it is a
+  much larger protocol than `exec --json`.
+- `format.WriteAtomic` now exists and dispatch uses it; the three hand-rolled
+  atomic writers noted in section 1 (config, update, hooks) can adopt it.
 
 ## Smaller
 
@@ -262,7 +352,9 @@ that before relying on it.
   measuring and truncation in `render.go`. Judge first whether truncation at
   preview width loses the important part; if it does, width handling matters
   more than colour.
-- **Copilot's join key** for both hooks and dispatch.
+- **Copilot's join key** for hooks. Dispatch settled it: `sessionId` appears
+  only on the `result` event, but `--session-id` lets orbit choose it up front,
+  which is the same trick claude allows.
 - **`Pane.SetWatching`** is built and tested but unused: with one connection
   following the cursor there is never an unwatched session streaming. It only
   earns its place if streaming is ever paused wholesale.

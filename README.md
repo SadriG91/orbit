@@ -113,6 +113,7 @@ notes, and updates the Homebrew cask in
 | `p`     | group the list under project headings                      |
 | `n`     | new session, same agent, in the selected project's dir     |
 | `1/2/3` | new claude / codex / copilot session in that dir           |
+| `d`     | dispatch a task to an agent headlessly, in that dir        |
 | `x`     | kill the tmux session (the transcript is untouched)        |
 | `/`     | filter by title, path, branch or agent                     |
 | `a`     | show everything (default hides untitled + older than 30d)  |
@@ -202,7 +203,7 @@ without pressing `s`. It's off by default because it spends tokens as you browse
 
 | icon | meaning                                                       |
 |------|---------------------------------------------------------------|
-| `▲`  | needs you — parked on a permission prompt                      |
+| `▲`  | needs you — a permission prompt, or a dispatch that stopped     |
 | `◆`  | your turn — the agent finished and is waiting                  |
 | `●`  | working                                                        |
 | `○`  | tmux session alive, but the agent has exited (just a shell)    |
@@ -218,11 +219,61 @@ reports each change as it happens, so a permission prompt shows as ▲ the
 second it is drawn rather than after a heuristic delay. Claude sessions have
 this today; codex and copilot are on the older path.
 
+Dispatched sessions (`d`) don't infer anything at all: orbit started the
+process and is reading the CLI's own event stream, so "working" means an event
+said so.
+
 Everything else falls back to joining the transcript with live tmux facts: an
 unanswered tool call that stops advancing reads as a permission prompt. That
 guess is right for prompts and wrong for slow tools, which is exactly why the
 hooks exist. Copilot keeps a database rather than an event stream, so its
-fallback states are coarser still.
+fallback states are coarser still — though only in the dashboard's usual mode:
+its *non-interactive* CLI has the richest event stream of the three, which is
+what dispatch uses.
+
+## Dispatch
+
+`d` hands an agent a task without opening a terminal for it. You type what you
+want done, orbit starts the agent headlessly in the selected project's
+directory, and the run appears in the list like any other session — working,
+then waiting for you.
+
+A dispatch is not a separate kind of session. All three CLIs write to their
+ordinary stores in non-interactive mode, so `⏎` on a finished dispatch resumes
+it in the interactive TUI with the whole conversation in front of you, and
+carries on appending to the same transcript. Dispatch starts work; taking it
+over is the same key as everything else.
+
+The runner is orbit itself, in a tmux session on orbit's private server, which
+is why it behaves like the rest of the dashboard: it survives quitting orbit,
+`x` kills it, and sitting on the row shows the live output. When the run ends
+the pane goes with it, leaving a session to resume. The narration is also kept
+in `~/.cache/orbit/dispatch/<id>.log`.
+
+**Approvals stop the run rather than guessing.** Claude is the only one of the
+three that can ask for permission non-interactively, and it asks orbit rather
+than you. Orbit always answers the same way: it interrupts the turn and marks
+the session ▲ needs you, with the exact command it wanted to run in the detail
+pane. `⏎` then resumes it where it stopped. Nothing is approved on your behalf,
+and nothing is silently refused — which is what the alternative would have
+been, since a dispatched claude that cannot ask simply gets its tool denied and
+talks its way around it.
+
+Codex and copilot have no approval channel in this mode at all, so a dispatch
+to either runs to the end under whatever their own settings permit. Copilot
+goes further: its CLI requires `--allow-all-tools` to run non-interactively, so
+orbit will not dispatch one until you have said so in config.
+
+```toml
+[dispatch]
+timeout = "30m"                  # how long a run may take before orbit stops it
+claude_permission_mode = ""      # empty: obey the same settings your claude does
+copilot_allow_all_tools = false  # required before a copilot dispatch will start
+```
+
+Set `claude_permission_mode = "manual"` if you would rather be asked about
+everything an unattended run does. There is no cost to being stopped often —
+taking a session over resumes it exactly where it left off.
 
 ## How it works
 
@@ -239,6 +290,24 @@ Claude's per-project directory name is lossy — `/` and `.` both become `-` —
 the working directory is read out of the records rather than decoded from the
 path. Older Codex rollouts key the session as `id` rather than `session_id`, and
 fall back to the uuid in the filename.
+
+**Dispatch** (`d`) drives each CLI's non-interactive mode and reads its JSONL
+event stream. The flags were arrived at by running them, not from the docs:
+
+| agent | how orbit runs it | approval |
+|-------|-------------------|----------|
+| Claude Code | `-p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio --session-id <uuid>` | `control_request{can_use_tool}`, answered with deny + interrupt |
+| Codex | `exec --json --skip-git-repo-check -C <dir>` | none exists in `exec` mode |
+| Copilot CLI | `-p --output-format json --session-id <uuid> --allow-all-tools` | none exists; the flag is mandatory |
+
+`--permission-prompt-tool stdio` is what makes the approval visible at all —
+without it the CLI auto-denies the tool and the model works around the refusal.
+Claude and copilot accept a session id, so orbit picks one before the process
+starts and the run is joined to a session from its first tick; codex only
+reveals its `thread_id` on the first event, and orbit records it then. No
+sandbox or approval policy is imposed on codex, and no permission mode on
+claude by default: your own config decides, so a handoff means "your agent
+would have prompted here".
 
 **tmux** runs on a private server (`tmux -L orbit`) with its own config at
 `~/.config/orbit/tmux.conf`, installed from a copy embedded in the binary. It
@@ -313,7 +382,7 @@ server or read the actual session stores.
 
 `~/.config/orbit/config.toml` is written with annotated defaults on first run:
 icons, attach behaviour, notifications, `recent_days`, sort order, grouping,
-spawn delays, updates and the per-provider summary commands. Environment
+spawn delays, dispatch, updates and the per-provider summary commands. Environment
 variables (`ORBIT_ICONS`, `ORBIT_SPAWN_DELAY`, `ORBIT_TAB_DELAY`) still win
 over the file, so a single run can be changed without editing it.
 

@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/sadrig91/orbit/internal/config"
+	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/pane"
@@ -122,6 +123,14 @@ type Model struct {
 	filtering bool
 	showAll   bool
 
+	// The dispatch prompt. Target is captured when `d` is pressed rather than
+	// read back when Enter is: a scan landing mid-typing re-sorts the list and
+	// moves the cursor, and the task you were writing belongs to the session
+	// you were looking at when you started writing it.
+	dispatching  bool
+	dispatchTo   session.Agent
+	dispatchInto string
+
 	preview     string
 	previewName string
 
@@ -190,7 +199,8 @@ func New(cfg config.Config, attachOverride, version string) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.scanCmd(), tick(), m.spin.Tick, m.updateCheckCmd(), pruneHookStateCmd)
+	return tea.Batch(m.scanCmd(), tick(), m.spin.Tick, m.updateCheckCmd(),
+		pruneHookStateCmd, pruneDispatchCmd)
 }
 
 // pruneHookStateCmd sweeps hook state files that outlived their sessions. Its
@@ -322,11 +332,17 @@ func (m *Model) refreshCmd() tea.Cmd {
 // sessions started with `n` to whatever transcript they turned out to write.
 func scan(gen int, ix *session.Index) tea.Msg {
 	sessions := ix.Scan()
+	// One read of the dispatch directory for the whole scan, rather than a
+	// lookup per session: there are a handful of dispatches and hundreds of
+	// sessions. Joining here is the UI's job — it is the layer allowed to know
+	// about both an agent and the machinery around it.
+	dispatches := dispatch.Active()
 	byID := map[string]*session.Session{}
 	for _, s := range sessions {
 		// Sessions come from a cache and are reused across ticks, so last
 		// tick's tmux link has to be cleared or a killed session stays "live".
 		s.Tmux = nil
+		s.Dispatch = dispatches[dispatch.Key(s.Agent.String(), s.ID)]
 		byID[s.ID] = s
 	}
 
@@ -492,6 +508,20 @@ func save(what string, write func() error) tea.Cmd {
 		}
 		return nil
 	}
+}
+
+// resetPrompt puts the shared text input back to being the quick filter.
+//
+// One textinput serves three prompts — filter, full-text search, dispatch —
+// and each sets its own prompt string, placeholder and length limit. Undoing
+// that in one place is what stops the next `/` inheriting the last dispatch's
+// 4000-character budget and the word "task" as its placeholder.
+func (m *Model) resetPrompt() {
+	m.searching = false
+	m.dispatching = false
+	m.filter.Prompt = "/"
+	m.filter.Placeholder = "filter"
+	m.filter.CharLimit = 80
 }
 
 func (m *Model) sel() *session.Session {
@@ -875,6 +905,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Freshly spawned, so nothing can be attached yet — nothing to focus.
 		return m, m.attach(msg.name, msg.cwd, focusTarget{}, msg.mode)
 
+	case dispatchedMsg:
+		// Deliberately no attach. The point of a dispatch is that it runs
+		// without a terminal; the row appears in the list within a tick or two
+		// and the live preview shows it working if you sit on it.
+		if msg.err != "" {
+			m.say("dispatch failed: " + msg.err)
+			return m, nil
+		}
+		m.say(msg.agent + " is working on it in " + msg.cwd)
+		return m, m.refreshCmd()
+
 	case updateFoundMsg:
 		return m, m.updateApplyCmd(msg.version)
 
@@ -901,15 +942,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filtering = false
 				m.filter.SetValue("")
 				m.filter.Blur()
+				m.resetPrompt()
 				m.rebuild()
 			case "enter":
 				m.filtering = false
 				m.filter.Blur()
+				if m.dispatching {
+					task := m.filter.Value()
+					m.filter.SetValue("")
+					m.resetPrompt()
+					return m, m.dispatch(m.dispatchTo, m.dispatchInto, task)
+				}
 				if m.searching {
 					q := strings.TrimSpace(m.filter.Value())
-					m.searching = false
 					m.filter.SetValue("")
-					m.filter.Prompt = "/"
+					m.resetPrompt()
 					if q == "" {
 						m.query, m.matches = "", nil
 						m.rebuild()
@@ -924,8 +971,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				var cmd tea.Cmd
 				m.filter, cmd = m.filter.Update(msg)
-				if !m.searching {
-					m.rebuild() // quick filter is live; full-text waits for enter
+				if !m.searching && !m.dispatching {
+					m.rebuild() // quick filter is live; the other two wait for enter
 				}
 				return m, cmd
 			}
@@ -957,13 +1004,13 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.cursor = max(0, len(m.view)-1)
 		return m, m.capture()
 	case "/":
-		m.searching = false
+		m.resetPrompt()
 		m.filtering = true
-		m.filter.Prompt = "/"
 		m.filter.Placeholder = "filter titles and paths"
 		m.filter.Focus()
 		return m, textinput.Blink
 	case "f":
+		m.resetPrompt()
 		m.searching = true
 		m.filtering = true
 		m.filter.Prompt = "search: "
@@ -1027,6 +1074,21 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.spawn(s.Agent, s.Cwd)
+	case "d":
+		ag, cwd, ok := m.dispatchTarget()
+		if !ok {
+			return m, nil
+		}
+		m.dispatchTo, m.dispatchInto = ag, cwd
+		m.dispatching, m.filtering = true, true
+		m.filter.Prompt = "⇢ " + ag.String() + " in " + shortDir(cwd) + ": "
+		m.filter.Placeholder = "what should it do?"
+		// Long enough for a real brief. The quick filter's 80 is a sensible
+		// cap on a substring match and an absurd one on a task description.
+		m.filter.CharLimit = 4000
+		m.filter.SetValue("")
+		m.filter.Focus()
+		return m, textinput.Blink
 	case "1", "2", "3":
 		s := m.sel()
 		if s == nil {

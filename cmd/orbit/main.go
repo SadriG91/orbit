@@ -31,6 +31,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	// `orbit dispatch <id>` — the headless runner the dashboard puts in a tmux
+	// pane. Also before flags: this is a whole mode of the program, not an
+	// option on the dashboard, and it takes an id rather than the job itself
+	// because the job includes a prompt and the invocation is typed into a
+	// shell. See cmd/orbit/dispatch.go.
+	if len(os.Args) == 3 && os.Args[1] == "dispatch" {
+		os.Exit(runDispatch(os.Args[2]))
+	}
+
 	var (
 		window      = flag.Bool("window", false, "attach sessions in a new Ghostty window instead of a tab")
 		inline      = flag.Bool("inline", false, "attach in this terminal instead of spawning a tab")

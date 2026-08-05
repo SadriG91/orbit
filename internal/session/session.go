@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/tmux"
@@ -127,6 +128,12 @@ type Session struct {
 	hint  Hint
 	Tmux  *tmux.Session
 	State State
+
+	// Dispatch is the record of an orbit-driven headless run of this session,
+	// when there is one. Joined on by the UI's scan, which reads the whole
+	// record directory once rather than a file per session — see
+	// dispatch.Active.
+	Dispatch *dispatch.Record
 }
 
 // ShortCwd is home-relative and at most two trailing components.
@@ -181,6 +188,35 @@ func (s *Session) Live() bool {
 }
 
 func (s *Session) Resolve(now time.Time) {
+	// A dispatch outranks everything below, including the tmux checks, and is
+	// the only source here that is not inference at all: orbit started the
+	// process and read the CLI's own event stream, so "working" means an event
+	// said so and "needs you" means the agent blocked asking for permission.
+	//
+	// It has to come before the tmux checks rather than after because a
+	// finished dispatch has no tmux left — the runner ends with its pane — and
+	// the whole point is that the session is then sitting there waiting to be
+	// taken over.
+	if d := s.Dispatch; d != nil && s.dispatchTrusted(d) {
+		switch d.Status {
+		case dispatch.Running:
+			s.State = Working
+			return
+		case dispatch.NeedsYou:
+			s.State = NeedsApproval
+			return
+		case dispatch.Failed:
+			// Also "needs you": a dispatch that stopped is exactly the thing
+			// worth walking over to, and ▲ is how orbit says so — including
+			// the desktop notification. The detail pane carries the reason.
+			s.State = NeedsApproval
+			return
+		case dispatch.Done:
+			s.State = YourTurn
+			return
+		}
+	}
+
 	if s.Tmux == nil {
 		s.State = Dormant
 		return
@@ -233,6 +269,28 @@ func (s *Session) Resolve(now time.Time) {
 // is believed before handing back to that same inference. One constant
 // because they are the same judgement: how much stillness means "parked".
 const stillnessWindow = 12 * time.Second
+
+// dispatchTrusted decides whether a dispatch record still speaks for this
+// session. Two questions, one per half of the lifecycle.
+//
+// A run claiming to be *running* is only believed while its runner is alive,
+// and the runner lives in a tmux session — so no tmux means no runner. That
+// covers the case the hooks work already learned the hard way: killing a
+// session SIGHUPs whatever was inside it, so the process never gets to write
+// its own ending, and a record left saying "working" would spin a dot forever.
+//
+// A *finished* run is believed until the conversation moves past it. Resuming
+// a dispatched session interactively is the intended next step, and the moment
+// someone types into it the record is describing a previous chapter. Orbit's
+// own resume path calls dispatch.Forget as well; this covers the resumes it
+// does not perform. The margin is the same 30 seconds hookTrusted allows, for
+// the same reason — the transcript's clock and orbit's are not the same clock.
+func (s *Session) dispatchTrusted(d *dispatch.Record) bool {
+	if d.Live() {
+		return s.Tmux != nil
+	}
+	return !s.Modified.After(d.Ended.Add(30 * time.Second))
+}
 
 // hookTrusted decides whether a recorded hook state still speaks for this
 // session.

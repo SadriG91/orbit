@@ -50,6 +50,8 @@ Dependencies run strictly one way:
 ```
 format, config      no local imports
 hooks               agent hook events → state files; imports format only
+dispatch            runs an agent CLI headlessly, parses its JSONL event
+                    stream → records; imports format only
 tmux                names and strings only — knows nothing about agents
 session             the domain model (parsers, index, state, sorting)
 search, summary     read transcripts; depend on session
@@ -62,6 +64,11 @@ ui                  composes everything
 a session, spawning a new one, and attaching all live in `internal/ui/attach.go`.
 Keep it that way: pushing agent knowledge into `tmux`, or tmux knowledge into
 `session`, is the main structural regression to avoid.
+
+`hooks` and `dispatch` both carry per-agent knowledge while sitting below
+`session`, and both do it the same way: keyed by the agent's *name*, never by
+`session.Agent`. That is what keeps them under the domain model rather than
+beside it.
 
 **Session discovery** (`internal/session/`): one file per agent — `claude.go`
 reads `~/.claude/projects/*/*.jsonl`, `codex.go` reads
@@ -110,6 +117,21 @@ on the strength of a changelog entry without a failing test to go with it.
 **Agents are launched by typing into an interactive login shell**, not via
 `new-session <cmd>` — agents are frequently shell functions or version-manager
 shims that don't exist in a bare `sh -c`. Hence `spawn_delay`.
+
+**Dispatch** (`internal/dispatch/`) is the other half of `hooks`: hooks observe
+a session someone else drives, dispatch is orbit driving one. `d` writes a
+record to `~/.cache/orbit/dispatch/` and spawns `orbit dispatch <id>` into a
+tmux pane; that runner drives the CLI's non-interactive mode, parses its JSONL,
+and updates the record, which `Session.Resolve` prefers ahead of *everything*
+including the tmux checks — a finished dispatch has no tmux, because the runner
+kills its own pane so `⏎` resumes the conversation instead of attaching to a
+dead shell.
+
+Only an id is ever typed into the shell: prompts are arbitrary user text and
+`tmux.Spawn` types what it is given. The per-agent event tables in `claude.go`,
+`codex.go` and `copilot.go` were sampled from real runs, and the tests use real
+recorded lines — TODO.md §2 records what each stream actually does, including
+the two deadlocks that only appeared against a live CLI.
 
 **Summaries** (`internal/summary/`) run each provider's own CLI in
 non-interactive mode (`claude -p`, `codex exec`, `copilot -p`), so there are no
