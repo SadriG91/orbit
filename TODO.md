@@ -88,6 +88,60 @@ inline JSON and was verified end to end: the hook fired, the payload carried
 `session_id`, `cwd` and `transcript_path`, and it did not displace global
 settings.
 
+### Verified in the interactive TUI, not just print mode
+
+Driven end to end in a real interactive claude inside orbit's tmux, forced to
+a genuine permission prompt (network commands are never auto-approved; `echo`
+is, which voided the first attempt):
+
+```
++0s   SessionStart
++3s   UserPromptSubmit
++6s   PreToolUse          tool=Bash
++6s   PermissionRequest   tool=Bash      <- the prompt appeared on screen this second
++12s  Notification        "Claude needs your permission"   <- six seconds later
++13s  PostToolUse                        <- right after approval
++16s  Stop
+```
+
+Two design consequences. **Subscribe to `PermissionRequest`, not
+`Notification`**: the notification is a delayed courtesy that fires ~6s after
+the prompt has been sitting, so building on it would inherit the very lag this
+work exists to remove. And **PostToolUse arriving right after approval** is the
+clean "working again" edge, with `Stop` as "your turn".
+
+### Coverage is total, not partial
+
+Earlier drafts assumed sessions the user starts themselves would be left on
+transcript inference. They won't be, because they are never live in orbit at
+all: a session only gets tmux state if it lives on orbit's private socket, and
+everything on that socket went through `tmux.Spawn` — which types the command,
+which orbit composes. Injecting `--settings` there covers every session whose
+state can matter. The inference fallback serves only sessions predating the
+upgrade, until they are next resumed.
+
+Rather than quoting JSON through a typed shell command, write the hooks file
+once per start to `~/.cache/orbit/hooks/claude.json` and pass the path. It is
+orbit's own cache, not user config, and Claude has no trust-hash on hook
+definitions, so the file may change freely between releases.
+
+### Discovered on the way: the pane title is a live state signal
+
+The agent's OSC title lands in tmux's `#{pane_title}` — a separate field from
+the window title orbit sets, readable by adding one format to the
+`list-sessions` call orbit already makes every tick. Observed on claude:
+
+- **working**: braille spinner frames, `⠂ Run curl command…` — the title
+  *changes* between samples, including for the whole duration of a running tool
+- **parked** (at a prompt, or done): static `✳ Run curl command…`
+
+Title *change-detection* between ticks is therefore a content-free
+discriminator for exactly the 10.8% case: a long tool run animates, a
+permission prompt is still. No glyph parsing, no format coupling — just "did
+this string change since last tick". Worth using as the fallback tiebreaker for
+unhooked sessions, replacing the 12s stillness rule with a one-tick answer.
+Not yet checked for codex or copilot titles.
+
 ### Two traps
 
 **The hook command string must never change.** Codex records trust against the
