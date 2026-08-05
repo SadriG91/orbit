@@ -89,6 +89,9 @@ type Conn struct {
 
 // Dial attaches a control client to a session on orbit's tmux server.
 func Dial(session string) (*Conn, error) {
+	if _, err := commandTarget(session); err != nil {
+		return nil, err
+	}
 	cmd := exec.Command("tmux", tmux.Args("-CC", "attach", "-t", session)...)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
@@ -119,6 +122,18 @@ func Dial(session string) (*Conn, error) {
 		c.Close()
 		return nil, fmt.Errorf("control client never completed its handshake")
 	}
+}
+
+// commandTarget validates a value before it is interpolated into a command
+// sent through control mode. Unlike exec.Command arguments, this string is
+// parsed by tmux as command language, where whitespace, quotes, comments,
+// backslashes and semicolons all have syntax. Orbit-generated session names
+// pass through the same shared allowlist in package tmux.
+func commandTarget(target string) (string, error) {
+	if err := tmux.ValidateTarget(target); err != nil {
+		return "", err
+	}
+	return target, nil
 }
 
 // Notifications is closed when the connection ends.
@@ -169,7 +184,11 @@ func (c *Conn) Command(cmd string) ([]string, error) {
 // enough for the whole dashboard: moving focus between sessions costs a
 // command, not a process.
 func (c *Conn) Switch(session string) error {
-	_, err := c.Command("switch-client -t " + session)
+	target, err := commandTarget(session)
+	if err != nil {
+		return err
+	}
+	_, err = c.Command("switch-client -t " + target)
 	return err
 }
 
@@ -188,7 +207,11 @@ func (c *Conn) SetOutput(on bool) error {
 // SendKeys types into a pane. Note this is the user's keystrokes being
 // relayed — orbit still originates nothing on its own.
 func (c *Conn) SendKeys(pane, keys string) error {
-	_, err := c.Command(fmt.Sprintf("send-keys -t %s %s", pane, keys))
+	target, err := commandTarget(pane)
+	if err != nil {
+		return err
+	}
+	_, err = c.Command(fmt.Sprintf("send-keys -t %s %s", target, keys))
 	return err
 }
 
@@ -201,6 +224,10 @@ func (c *Conn) SendKeys(pane, keys string) error {
 // -H accepts hexadecimal bytes, so the command itself contains only a fixed
 // vocabulary plus [0-9a-f]. UTF-8 is sent as its constituent bytes.
 func (c *Conn) SendText(pane, value string) error {
+	target, err := commandTarget(pane)
+	if err != nil {
+		return err
+	}
 	const chunk = 512
 	b := []byte(value)
 	for len(b) > 0 {
@@ -209,7 +236,7 @@ func (c *Conn) SendText(pane, value string) error {
 		for _, v := range b[:n] {
 			args = append(args, fmt.Sprintf("%02x", v))
 		}
-		if _, err := c.Command("send-keys -H -t " + pane + " " + strings.Join(args, " ")); err != nil {
+		if _, err := c.Command("send-keys -H -t " + target + " " + strings.Join(args, " ")); err != nil {
 			return err
 		}
 		b = b[n:]
@@ -230,7 +257,11 @@ type paneInputMode struct {
 }
 
 func (c *Conn) inputMode(pane string) (paneInputMode, error) {
-	out, err := c.Command("display-message -p -t " + pane +
+	target, err := commandTarget(pane)
+	if err != nil {
+		return paneInputMode{}, err
+	}
+	out, err := c.Command("display-message -p -t " + target +
 		" '#{mouse_any_flag} #{mouse_sgr_flag} #{alternate_on}'")
 	if err != nil {
 		return paneInputMode{}, err
@@ -263,11 +294,15 @@ func (c *Conn) sendWheel(pane string, x, y int, direction WheelDirection, mode p
 	}
 
 	if mode.alternate {
+		target, err := commandTarget(pane)
+		if err != nil {
+			return err
+		}
 		key := "Up"
 		if direction == WheelDown {
 			key = "Down"
 		}
-		_, err := c.Command(fmt.Sprintf("send-keys -N 3 -t %s %s", pane, key))
+		_, err = c.Command(fmt.Sprintf("send-keys -N 3 -t %s %s", target, key))
 		return err
 	}
 	return nil
