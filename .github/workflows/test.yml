@@ -1,12 +1,28 @@
 name: test
 
-# Called by both ci.yml and release.yml, so a release can't run a weaker suite
-# than a PR. Both platforms: an Ubuntu-only bug once shipped in two releases.
+# Both the CI entry point and the workflow release.yml reuses, so a release can
+# never run a weaker suite than a pull request.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # The floor from internal/tmux.MinVersion, and the only version tested.
+  #
+  # Testing the oldest supported tmux is what catches the mistake that reaches
+  # people: accidentally depending on something newer than orbit promises. A
+  # newer tmux breaking us is the opposite risk and deliberately isn't covered
+  # here — that one shows up in development, where everyone runs current.
+  TMUX_VERSION: "3.4"
 
 jobs:
   test:
+    # Both platforms: an Ubuntu-only bug once shipped in two releases.
     strategy:
       fail-fast: false
       matrix:
@@ -19,14 +35,38 @@ jobs:
           go-version: stable
           cache: true
 
-      - name: install tmux
+      # Built rather than taken from a package manager. brew ships whatever is
+      # current, so the macOS job was quietly testing a version orbit makes no
+      # promise about, and apt only happens to ship the floor today. Neither is
+      # a version anyone chose. It builds in well under a minute, which is
+      # cheaper than a cache is in ways to go wrong.
+      - name: build tmux ${{ env.TMUX_VERSION }}
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install tmux
+          configure=(--prefix="$HOME/.local/tmux")
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install libevent ncurses
+            libevent=$(brew --prefix libevent)
+            ncurses=$(brew --prefix ncurses)
+            export PKG_CONFIG_PATH="$libevent/lib/pkgconfig:$ncurses/lib/pkgconfig"
+            # configure refuses to guess this one on macOS and wants it decided.
+            configure+=(--disable-utf8proc)
           else
-            sudo apt-get update && sudo apt-get install -y tmux
+            sudo apt-get update
+            sudo apt-get install -y libevent-dev libncurses-dev pkg-config
           fi
+          curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" | tar xz
+          cd "tmux-${TMUX_VERSION}"
+          ./configure "${configure[@]}"
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+          make install
+          echo "$HOME/.local/tmux/bin" >> "$GITHUB_PATH"
+
+      # Loud if the build produced something else: the suite would otherwise
+      # pass against a tmux nobody meant to test.
+      - name: confirm the version under test
+        run: |
           tmux -V
+          test "$(tmux -V)" = "tmux ${TMUX_VERSION}"
 
       - name: gofmt
         run: |
