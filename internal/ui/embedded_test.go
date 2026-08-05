@@ -502,6 +502,7 @@ func TestTerminalFrameReadyRejectsStartupFrames(t *testing.T) {
 		{"single spinner", "starting…", false},
 		{"shell cursor", "› ", false},
 		{"agent frame", "Claude Code\n› Ask anything", true},
+		{"wide agent frame", "界界界界界界界界\n›", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
