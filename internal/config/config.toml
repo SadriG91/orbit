@@ -83,9 +83,13 @@ command = ["claude", "-p", "--no-session-persistence", "--model", "claude-haiku-
 # account"), which is why the default names no model at all and takes whatever
 # the account gives it.
 [summary.codex]
+# max_input_chars = 24000
 command = ["codex", "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check"]
 
+# Copilot is the one with no way to skip recording a session, so its summaries
+# rely entirely on the scratch directory to stay out of your projects.
 [summary.copilot]
+# max_input_chars = 24000
 command = ["copilot", "-p", "-s", "--no-ask-user", "--available-tools", ""]
 
 [update]
