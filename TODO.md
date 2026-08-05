@@ -60,6 +60,29 @@ trust approval UX), the copilot install decision (global file, needs consent
 and an uninstall; test the PascalCase aliases live first), and the title
 fallback for unhooked sessions.
 
+A six-angle review hardened it: both shell boundaries quoted (spawn line and
+hook command — a space in `$HOME` or the binary path broke either), stale
+state cleared on resume (`Forget` plus a matcher-limited SessionStart, since
+kill-session SIGHUPs the agent past its SessionEnd), parallel-tool-batch
+overwrites pinned by `tool_use_id`, transcript-definite contradictions
+(HintDone/HintApproval) beating stale hook claims, softness carried in the
+State instead of re-derived from agent names, the prune ungated from the
+summary flag, and `go run` temp paths refused.
+
+Known limitations, deliberate: an **approved long tool keeps ▲ until its
+PostToolUse** — no event fires at the approval itself, only at tool
+completion; the title-stillness tiebreak is the intended fix. And a hook
+install that is entirely broken (unwritable cache, mangled settings) is
+silent by contract — orbit just runs on inference; a `--doctor`-style check
+would make the two modes distinguishable.
+
+Deferred reuse cleanups from the same review: three hand-rolled atomic
+writers (config, update, hooks) that want one `format.WriteAtomic`; the
+`<agent>-<id>.json` cache convention now lives in two packages; and a
+dependency-light hook binary — measured 11.6ms per event of orbit process
+startup, ~5.4ms of it binary load, fine at tool-call cadence but worth
+revisiting if events ever get denser.
+
 **The signal orbit exists to provide is wrong about 1 in 9 times.** Measured
 over 8,327 real tool calls in local transcripts:
 

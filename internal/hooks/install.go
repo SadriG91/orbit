@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sadrig91/orbit/internal/format"
 )
@@ -25,18 +26,28 @@ import (
 // for the user's own copilot runs too; that needs saying out loud and an
 // uninstall, so it is a decision rather than a default.
 
-// claudeEvents is what orbit subscribes to. PermissionRequest, not
-// Notification: the notification fires ~6s after the prompt has been
-// sitting, and PreToolUse is omitted because it precedes the permission
-// gate, so it adds a subprocess per tool call and no information —
-// UserPromptSubmit already said "working".
-var claudeEvents = []string{
-	"UserPromptSubmit",
-	"PermissionRequest",
-	"PermissionDenied",
-	"PostToolUse",
-	"Stop",
-	"SessionEnd",
+// claudeEvents is what orbit subscribes to, with the matcher that limits
+// each where one is needed.
+//
+// PermissionRequest, not Notification: the notification fires ~6s after the
+// prompt has been sitting. No PreToolUse: it precedes the permission gate,
+// so it adds a subprocess per tool call and no information. SessionStart is
+// limited to startup|resume|clear because it also fires on compaction, in
+// the middle of a working turn, where "your turn" would be a lie — and it is
+// subscribed at all because a resumed session must overwrite whatever the
+// previous run's state file claimed before it died.
+var claudeEvents = []struct {
+	name    string
+	matcher string
+}{
+	{"SessionStart", "startup|resume|clear"},
+	{"UserPromptSubmit", ""},
+	{"PermissionRequest", ""},
+	{"PermissionDenied", ""},
+	{"PostToolUse", ""},
+	{"PostToolUseFailure", ""},
+	{"Stop", ""},
+	{"SessionEnd", ""},
 }
 
 // hookTimeout bounds the hook, in seconds. The default would be far worse
@@ -56,7 +67,11 @@ func SpawnArgs(agent string) string {
 	if err != nil {
 		return ""
 	}
-	return " --settings " + path
+	// Quoted, because nothing downstream will do it: the composed command is
+	// typed into an interactive shell by tmux send-keys, so a space in $HOME
+	// would otherwise split the path into a bad flag and a stray word that
+	// claude reads as a prompt.
+	return " --settings " + shellQuote(path)
 }
 
 func settingsPath() string { return format.Home(".cache", "orbit", "hooks", "claude.json") }
@@ -65,15 +80,28 @@ func settingsPath() string { return format.Home(".cache", "orbit", "hooks", "cla
 // it isn't already exactly what it should be. Content-compared rather than
 // written every time so a running dashboard doesn't churn the file's mtime
 // with every spawn.
+// executable is a seam: test binaries live under the temp dir themselves,
+// which is exactly what the guard below rejects.
+var executable = os.Executable
+
 func ensureClaudeSettings() (string, error) {
-	exe, err := os.Executable()
+	exe, err := executable()
 	if err != nil {
 		return "", err
 	}
-	want, err := ClaudeSettings(exe)
-	if err != nil {
-		return "", err
+	// A `go run` binary lives under the temp dir and is deleted the moment
+	// the run exits — baking its path into a file that real sessions read at
+	// startup would leave them invoking a ghost. update.classify draws the
+	// same line for the same reason. Dev builds run from a checkout path and
+	// pass fine.
+	if strings.HasPrefix(exe, os.TempDir()) {
+		return "", os.ErrNotExist
 	}
+	// Deliberately not resolving symlinks (contrast update.Detect, which
+	// must): the brew path /opt/homebrew/bin/orbit survives version bumps,
+	// while its Caskroom target dies with each one — for a path baked into a
+	// config file, the link is the durable name.
+	want := ClaudeSettings(exe)
 	path := settingsPath()
 	if have, err := os.ReadFile(path); err == nil && string(have) == string(want) {
 		return path, nil
@@ -89,25 +117,36 @@ func ensureClaudeSettings() (string, error) {
 
 // ClaudeSettings renders the hooks stanza Claude merges over the user's own
 // settings. The command is the orbit binary by absolute path — inside a tmux
-// login shell there is no promise orbit is on PATH. Exported so checks that
-// need a real terminal can generate the same bytes for a binary of their
-// choosing rather than a hand-kept copy that drifts.
-func ClaudeSettings(exe string) ([]byte, error) {
+// login shell there is no promise orbit is on PATH — and quoted, because
+// Claude runs it through a shell. Exported so checks that need a real
+// terminal can generate the same bytes for a binary of their choosing rather
+// than a hand-kept copy that drifts.
+func ClaudeSettings(exe string) []byte {
 	type handler struct {
 		Type    string `json:"type"`
 		Command string `json:"command"`
 		Timeout int    `json:"timeout"`
 	}
 	type matcher struct {
-		Hooks []handler `json:"hooks"`
+		Matcher string    `json:"matcher,omitempty"`
+		Hooks   []handler `json:"hooks"`
 	}
 	events := map[string][]matcher{}
 	for _, ev := range claudeEvents {
-		events[ev] = []matcher{{Hooks: []handler{{
+		events[ev.name] = []matcher{{Matcher: ev.matcher, Hooks: []handler{{
 			Type:    "command",
-			Command: exe + " hook claude " + ev,
+			Command: shellQuote(exe) + " hook claude " + ev.name,
 			Timeout: hookTimeout,
 		}}}}
 	}
-	return json.MarshalIndent(map[string]any{"hooks": events}, "", " ")
+	// Marshalling a map of plain structs has no failure mode; the shape test
+	// would catch one appearing before any user did.
+	b, _ := json.MarshalIndent(map[string]any{"hooks": events}, "", " ")
+	return b
+}
+
+// shellQuote makes a string safe to place on a shell command line: wrapped
+// in single quotes, with any embedded single quote spliced as '\”.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

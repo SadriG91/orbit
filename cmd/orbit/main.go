@@ -24,19 +24,11 @@ var version = "dev"
 func main() {
 	// `orbit hook <agent> <event>` — the hidden subcommand the agents' hook
 	// systems call, dispatched before flags, config, tmux checks, anything.
-	// It runs inside the agent's own loop, and on copilot a non-zero exit
-	// denies the user's tool call outright — so this path must reach exit 0
-	// whatever happens, panic included, and must write nothing to stdout,
-	// which several hook events read as instructions.
-	// The word alone claims the invocation, however mangled the rest is: a
-	// truncated argv falling through to the normal CLI would exit non-zero,
-	// and on copilot that denies the tool call.
-	if len(os.Args) >= 2 && os.Args[1] == "hook" {
-		defer func() { recover(); os.Exit(0) }() //nolint:errcheck // exit 0 is the contract
-		if len(os.Args) >= 4 {
-			hooks.Run(os.Args[2], os.Args[3], os.Stdin)
-		}
-		return
+	// Dispatch owns the contract (exit 0 whatever happened, silence on
+	// stdout); it lives in the hooks package, next to where the stakes are
+	// documented, so main only has to honour the exit code.
+	if hooks.Dispatch(os.Args, os.Stdin) {
+		os.Exit(0)
 	}
 
 	var (

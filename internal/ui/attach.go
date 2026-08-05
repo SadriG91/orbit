@@ -82,6 +82,12 @@ func attachCommand(name string) *exec.Cmd {
 // plumbing. Every live session passes through one of these two functions,
 // which is what makes the hooks' coverage total.
 func resumeSession(s *session.Session) (string, error) {
+	// Whatever the state file claims is from a previous run — often one that
+	// ended in a kill, where SessionEnd never fired — and a resumed agent at
+	// an idle prompt emits nothing until you type, so a stale claim would
+	// stand indefinitely. SessionStart re-establishes state when the hooks
+	// are live; this covers the runs where they won't be.
+	hooks.Forget(s.Agent.String(), s.ID)
 	name := tmux.UniqueName(s.TmuxName())
 	cmd := s.Agent.ResumeCmd(s.ID) + hooks.SpawnArgs(s.Agent.String())
 	err := tmux.Spawn(name, s.Cwd, cmd, s.TabTitle(), s.Agent.String(), s.ID)

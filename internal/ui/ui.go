@@ -190,7 +190,15 @@ func New(cfg config.Config, attachOverride, version string) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.scanCmd(), tick(), m.spin.Tick, m.updateCheckCmd())
+	return tea.Batch(m.scanCmd(), tick(), m.spin.Tick, m.updateCheckCmd(), pruneHookStateCmd)
+}
+
+// pruneHookStateCmd sweeps hook state files that outlived their sessions. Its
+// own command rather than a rider on the summary prune, which is gated on the
+// summary feature flag — a lifecycle these files do not share.
+func pruneHookStateCmd() tea.Msg {
+	hooks.Prune(7 * 24 * time.Hour)
+	return nil
 }
 
 // updateCheckCmd asks whether a newer orbit exists, off the UI goroutine. The
@@ -575,9 +583,6 @@ func (m *Model) pruneCmd() tea.Cmd {
 	all := snapshot(m.all)
 	return func() tea.Msg {
 		summary.Prune(all)
-		// Hook state files too: SessionEnd removes them properly, this
-		// catches sessions that never got one — a killed agent, a crash.
-		hooks.Prune(7 * 24 * time.Hour)
 		return nil
 	}
 }
