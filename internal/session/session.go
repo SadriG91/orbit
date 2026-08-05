@@ -269,13 +269,9 @@ func NewIndex() *Index { return &Index{files: map[string]cached{}} }
 
 // Scan reads every store and returns a fresh snapshot of what it found.
 //
-// The sessions it hands back are copies, deliberately. The cache reuses parsed
-// *Session values across scans, and the caller goes on to write to what it gets
-// (Tmux, State) and to render it — while the next scan is already running.
-// Handing out the cached values directly would have the UI reading fields a
-// scan is concurrently writing. Session holds no mutable references — Tmux is
-// replaced wholesale on every scan, never mutated in place — so a shallow copy
-// is a complete one.
+// Session holds no mutable references — Tmux is replaced wholesale on every
+// scan, never mutated in place — so the shallow copy snapshot makes is a
+// complete one.
 func (ix *Index) Scan() []*Session {
 	ix.errsMu.Lock()
 	ix.errs = nil
@@ -285,11 +281,40 @@ func (ix *Index) Scan() []*Session {
 	out = append(out, ix.scanClaude()...)
 	out = append(out, ix.scanCodex()...)
 	out = append(out, ix.scanCopilot()...)
+	return snapshot(out)
+}
 
-	snap := make([]*Session, len(out))
-	for i, s := range out {
+// ScratchDir is where orbit runs the agent CLIs it drives itself — at present
+// only summarisation.
+//
+// Those runs are ordinary sessions as far as the agent is concerned: `claude
+// -p` writes a transcript keyed by its working directory. Run in the directory
+// of the session being summarised, it leaves a phantom conversation in that
+// project — auto-titled from whatever was in the excerpt, carrying a token
+// count of its own, and eligible to be summarised in turn. Worse, it is by
+// definition the most recently modified conversation in that directory, which
+// is exactly what the unlinked-tmux match in the UI's scan looks for, so a
+// resumed session could be joined to orbit's own bookkeeping instead of the
+// work it belongs to.
+//
+// Giving those runs a directory of their own keeps them out of real projects,
+// and snapshot drops them so they never reach the dashboard.
+func ScratchDir() string { return format.Home(".cache", "orbit", "scratch") }
+
+// snapshot copies the cache's sessions for the caller, dropping orbit's own.
+//
+// The copies are deliberate. The cache reuses parsed *Session values across
+// scans, and the caller goes on to write to what it gets (Tmux, State) and to
+// render it — while the next scan is already running.
+func snapshot(out []*Session) []*Session {
+	scratch := ScratchDir()
+	snap := make([]*Session, 0, len(out))
+	for _, s := range out {
+		if s.Cwd == scratch {
+			continue // orbit talking to itself; see ScratchDir
+		}
 		c := *s
-		snap[i] = &c
+		snap = append(snap, &c)
 	}
 	return snap
 }
