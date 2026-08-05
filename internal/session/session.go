@@ -104,9 +104,9 @@ func (s State) Label() string {
 	case Working:
 		return "working"
 	case NeedsApproval:
-		return "needs you"
+		return "needs attention"
 	case YourTurn:
-		return "your turn"
+		return "finished"
 	case ShellOnly:
 		return "shell"
 	}
@@ -191,7 +191,7 @@ func (s *Session) Resolve(now time.Time) {
 	// A dispatch outranks everything below, including the tmux checks, and is
 	// the only source here that is not inference at all: orbit started the
 	// process and read the CLI's own event stream, so "working" means an event
-	// said so and "needs you" means the agent blocked asking for permission.
+	// said so and "needs attention" means the agent blocked asking for permission.
 	//
 	// It has to come before the tmux checks rather than after because a
 	// finished dispatch has no tmux left — the runner ends with its pane — and
@@ -206,7 +206,7 @@ func (s *Session) Resolve(now time.Time) {
 			s.State = NeedsApproval
 			return
 		case dispatch.Failed:
-			// Also "needs you": a dispatch that stopped is exactly the thing
+			// Also "needs attention": a dispatch that stopped is exactly the thing
 			// worth walking over to, and ▲ is how orbit says so — including
 			// the desktop notification. The detail pane carries the reason.
 			s.State = NeedsApproval

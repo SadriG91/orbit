@@ -91,21 +91,28 @@ func resumeSession(s *session.Session) (string, error) {
 	hooks.Forget(s.Agent.String(), s.ID)
 	// A dispatch is over the moment a person takes the session over. Left in
 	// place, its record would keep answering for a conversation being typed
-	// into — "needs you" on a session already open in front of you.
+	// into — "needs attention" on a session already open in front of you.
 	dispatch.Forget(s.Agent.String(), s.ID)
 	name := tmux.UniqueName(s.TmuxName())
 	cmd := s.Agent.ResumeCmd(s.ID) + hooks.SpawnArgs(s.Agent.String())
 	err := tmux.Spawn(name, s.Cwd, cmd, s.TabTitle(), s.Agent.String(), s.ID)
+	if err == nil {
+		err = tmux.WaitForAgent(name)
+	}
 	return name, err
 }
 
 // newSession starts a fresh agent in cwd. It has no session id yet; the Model
 // links it to a transcript once the agent writes one.
-func newSession(ag session.Agent, cwd string) (string, error) {
+func newSession(ag session.Agent, cwd string, known []string) (string, error) {
 	stub := &session.Session{Agent: ag, Cwd: cwd, Title: "new " + ag.String()}
 	base := ag.Tag() + "-" + strings.NewReplacer("/", "-", ".", "_", " ", "_").Replace(stub.ShortCwd())
 	name := tmux.UniqueName(base)
 	cmd := ag.NewCmd() + hooks.SpawnArgs(ag.String())
 	err := tmux.Spawn(name, cwd, cmd, stub.TabTitle(), ag.String(), "")
+	if err == nil {
+		tmux.SetKnown(name, known)
+		err = tmux.WaitForAgent(name)
+	}
 	return name, err
 }

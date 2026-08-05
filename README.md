@@ -12,22 +12,22 @@ never kills work.
  ██████╗ ██████╗ ██████╗ ██╗████████╗
 ██╔═══██╗██╔══██╗██╔══██╗██║╚══██╔══╝
 ██║   ██║██████╔╝██████╔╝██║   ██║
-██║   ██║██╔══██╗██╔══██╗██║   ██║      ▲ 1 needs you   ◆ 1 your turn   ● 2 working
+██║   ██║██╔══██╗██╔══██╗██║   ██║      ▲ needs attention 1 · ● working 2
 ╚██████╔╝██║  ██║██████╔╝██║   ██║     18 of 77 sessions · claude · codex · copilot
  ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═╝   ╚═╝
 ╭─ SESSIONS · RECENT ────────────────────────────╮ ╭─ LIVE · WORK/API-GATEWAY ──────────────────╮
 │ ▌ ▲ cl work/api-gateway                     2m │ │ Refactor batch runner                      │
-│ ▌   Refactor batch runner            needs you │ │ ~/work/api-gateway                         │
-│   ⠸ cx src/widgets                         40m │ │ claude · main · 46 msgs · 2m ago  ▲ needs you│
+│ ▌   Refactor batch runner       needs attention │ │ ~/work/api-gateway                         │
+│   ⠸ cx src/widgets                         40m │ │ claude · main · 46 msgs · 2m ago ▲ attention│
 │     Evaluate the docs of this repo     working │ │                                            │
 │   ◆ cl services/billing                     1h │ │ ▸ last prompt                              │
-│     Add retry to the webhook queue   your turn │ │   now run the tests                        │
+│     Add retry to the webhook queue     finished │ │   now run the tests                        │
 │   · cp work/docs-site                       3d │ │                                            │
 │     Integrate Copilot in Actions               │ │ ▸ live output                              │
 │                                                │ │   ● Bash(go test ./...)                    │
 │                                                │ │     Do you want to proceed?                │
 ╰────────────────────────────────────────────────╯ ╰────────────────────────────────────────────╯
-  ⏎  attach   i  here   w  window   n  new   1/2/3  agent   x  kill   /  filter   a  all   q  quit
+  ⏎  attach   tab  drive   n  new   d  dispatch   /  filter   ?  shortcuts
 ```
 
 ## Why
@@ -103,6 +103,9 @@ notes, and updates the Homebrew cask in
 | key     | action                                                    |
 |---------|-----------------------------------------------------------|
 | `⏎`     | attach — resumes the session first if it isn't running     |
+| `tab`   | switch focus between sessions and the selected live pane   |
+| `ctrl+f`| toggle the focused live pane full screen                    |
+| `ctrl+e`| toggle a wider live pane while keeping sessions visible     |
 | `i`     | attach in this terminal; returns to orbit when you detach  |
 | `t`     | attach in a new Ghostty tab                                |
 | `w`     | attach in a new Ghostty window                             |
@@ -110,22 +113,47 @@ notes, and updates the Homebrew cask in
 | `S`     | queue every visible session that has no summary yet        |
 | `f`     | full-text search inside transcripts                        |
 | `o`     | cycle sort: age / tokens / project / agent                 |
-| `p`     | group the list under project headings                      |
-| `n`     | new session, same agent, in the selected project's dir     |
-| `1/2/3` | new claude / codex / copilot session in that dir           |
+| `p`     | cycle grouping: off / project folder / agent                |
+| `n`     | new session, same agent and dir, opened inside orbit        |
 | `d`     | dispatch a task to an agent headlessly, in that dir        |
 | `x`     | kill the tmux session (the transcript is untouched)        |
 | `/`     | filter by title, path, branch or agent                     |
 | `a`     | show everything (default hides untitled + older than 30d)  |
 | `r`     | refresh now                                                |
+| `?`     | open the keyboard shortcut helper                          |
 | `q`     | quit the dashboard — running sessions carry on             |
 
 `⏎` picks the best available: a Ghostty or iTerm2 tab on macOS, otherwise
 in-place. If the session is already showing in a tab, `⏎`, `t` and `w` switch
 to that tab instead of opening a second one; if its tab can't be found any
 more, a new one opens as before.
+
+`n` starts a normal interactive agent in tmux and keeps orbit on screen. Its
+live pane gets focus immediately. `tab` switches focus between the session list
+and that pane without replacing the terminal with a text preview. The terminal
+stays muted while its row remains selected. Moving through the list replaces it
+with the newly selected session's preview; pressing `tab` focuses that session.
+When the selected transcript is dormant, `tab` first resumes it in tmux and
+focuses it as soon as it is ready. The row and detail pane show one preparation
+state while Orbit
+waits for the agent—not just the shell or tmux pane—to be ready. The resume
+command and shell startup stay hidden; the row and terminal become live
+together. Once the pane is focused, normal keys—including `Shift+Tab`—go to
+the agent. `ctrl+f` toggles
+full screen, `ctrl+e` gives the pane more width without hiding the session list,
+the mouse wheel scrolls the agent when it is over the live pane, and `ctrl+g`
+is a second way back to sessions. Orbit keeps wheel reporting enabled so it
+cannot turn into accidental arrow-key navigation after returning to the session
+list, but only routes wheel events while the live pane has focus. The tmux
+session keeps running in the background, and `⏎` still
+attaches it to a full terminal whenever that is more comfortable.
+
 `/` filters titles and paths as you type; `f` searches message bodies and runs
-on Enter. `esc` clears a search.
+on Enter. `esc` clears a search. Press `?` for the full shortcut list without
+leaving the dashboard; `?` or `esc` closes it. `p` groups the Sessions pane
+into contiguous project-folder or agent sections, with a count in each heading.
+Grouping keeps the current `o` sort: the first session surfaced by that sort
+positions its group, and the same ordering is preserved inside the section.
 
 ## Search and summaries
 
@@ -203,8 +231,8 @@ without pressing `s`. It's off by default because it spends tokens as you browse
 
 | icon | meaning                                                       |
 |------|---------------------------------------------------------------|
-| `▲`  | needs you — a permission prompt, or a dispatch that stopped     |
-| `◆`  | your turn — the agent finished and is waiting                  |
+| `▲`  | needs attention — a permission prompt, or a dispatch that stopped |
+| `◆`  | finished — the agent completed its last response               |
 | `●`  | working                                                        |
 | `○`  | tmux session alive, but the agent has exited (just a shell)    |
 | `·`  | not running — `⏎` resumes it                                   |
@@ -233,9 +261,19 @@ what dispatch uses.
 
 ## Dispatch
 
-`d` hands an agent a task without opening a terminal for it. You type what you
-want done, orbit starts the agent headlessly in the selected project's
-directory, and the run appears in the list like any other session — working,
+`d` opens a dispatch composer in the dashboard's right pane, keeping the
+Sessions list visible. The selected session supplies the initial agent and
+directory, but neither is binding: edit the directory with `Tab`, use Up/Down
+to choose from known project directories (or type any path), and begin the task
+with `@claude`, `@codex`, or `@copilot` to choose the agent explicitly. For example:
+
+```text
+@codex can you check feature X?
+```
+
+With no mention, orbit uses the default shown in the composer. Relative
+directories are resolved from the directory where orbit was started, and `~`
+is supported. The run appears in the list like any other session — working,
 then waiting for you.
 
 A dispatch is not a separate kind of session. All three CLIs write to their
@@ -253,11 +291,11 @@ in `~/.cache/orbit/dispatch/<id>.log`.
 **Approvals stop the run rather than guessing.** Claude is the only one of the
 three that can ask for permission non-interactively, and it asks orbit rather
 than you. Orbit always answers the same way: it interrupts the turn and marks
-the session ▲ needs you, with the exact command it wanted to run in the detail
-pane. `⏎` then resumes it where it stopped. Nothing is approved on your behalf,
-and nothing is silently refused — which is what the alternative would have
-been, since a dispatched claude that cannot ask simply gets its tool denied and
-talks its way around it.
+the session ▲ needs attention, with the exact command it wanted to run in the
+detail pane. `⏎` then resumes it where it stopped. Nothing is approved on your
+behalf, and nothing is silently refused — which is what the alternative would
+have been, since a dispatched claude that cannot ask simply gets its tool denied
+and talks its way around it.
 
 Codex and copilot have no approval channel in this mode at all, so a dispatch
 to either runs to the end under whatever their own settings permit. Copilot
@@ -339,7 +377,7 @@ sending `cmd+T` via System Events and typing the attach command, which needs
 Accessibility permission and can only find tabs again by title. Without any
 of that, use `i`.
 
-**Notifications** use OSC 9 when a session flips to "needs you" or "your turn".
+**Notifications** use OSC 9 when a session needs attention or finishes a turn.
 
 ## Layout
 
@@ -381,10 +419,11 @@ server or read the actual session stores.
 ## Config
 
 `~/.config/orbit/config.toml` is written with annotated defaults on first run:
-icons, attach behaviour, notifications, `recent_days`, sort order, grouping,
-spawn delays, dispatch, updates and the per-provider summary commands. Environment
-variables (`ORBIT_ICONS`, `ORBIT_SPAWN_DELAY`, `ORBIT_TAB_DELAY`) still win
-over the file, so a single run can be changed without editing it.
+icons, attach behaviour, notifications, `recent_days`, sort order, grouping
+and its `group_by` mode, spawn delays, dispatch, updates and the per-provider
+summary commands. Environment variables (`ORBIT_ICONS`, `ORBIT_SPAWN_DELAY`,
+`ORBIT_TAB_DELAY`) still win over the file, so a single run can be changed
+without editing it.
 
 Settings orbit gains later are appended to the file on the next start, with
 the comments that explain them, and orbit says which ones it added. It only

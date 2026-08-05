@@ -6,10 +6,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/session"
-	"github.com/sadrig91/orbit/internal/term"
 
 	"charm.land/lipgloss/v2"
 )
@@ -58,11 +58,18 @@ var (
 	keyLabel  = lipgloss.NewStyle().Foreground(cMid)
 )
 
-// pill is a filled badge — the counts need to read at a glance from across the
-// room, which plain coloured text doesn't do.
-func pill(icon, text string, bg color.Color) string {
-	return lipgloss.NewStyle().Foreground(cInk).Background(bg).Bold(true).
-		Padding(0, 1).Render(icon + " " + text)
+// statusMetric is deliberately not a pill. These are live measurements, not
+// buttons or filters, so a small semantic mark and a strong count give them
+// enough hierarchy without adding another block of chrome to the header.
+func statusMetric(icon, label string, count int, accent color.Color) string {
+	iconStyle := lipgloss.NewStyle().Foreground(accent).Bold(true)
+	countStyle := lipgloss.NewStyle().Foreground(accent).Bold(true)
+	return iconStyle.Render(icon) + " " + sMid.Render(label) + " " + countStyle.Render(format.Itoa(count))
+}
+
+func stateMarker(icon, label string, accent color.Color) string {
+	style := lipgloss.NewStyle().Foreground(accent).Bold(true)
+	return style.Render(icon) + " " + style.Render(label)
 }
 
 func banner(width, height int) []string {
@@ -88,45 +95,175 @@ func (m *Model) render() string {
 	if m.w == 0 {
 		return "starting orbit…"
 	}
-
+	if m.terminalFocused && m.embedded != "" && m.terminalZoom {
+		return m.renderEmbedded()
+	}
 	head := m.header()
 	foot := m.footer()
-	bodyH := m.h - lipgloss.Height(head) - lipgloss.Height(foot)
-	if bodyH < 5 {
-		bodyH = 5
+	if m.showHelp {
+		bodyH := max(5, m.h-lipgloss.Height(head)-lipgloss.Height(foot))
+		body := titledPane("keyboard shortcuts · ? or esc to close", m.shortcutHelp(m.w-4, bodyH-3), m.w, bodyH)
+		return head + "\n" + body + "\n" + foot
 	}
-
-	// In lipgloss v2 Width() is the *total* rendered width, border included
-	// (v1 counted content+padding only). A box of width W therefore takes
-	// Width(W) and holds W-4 of content: 2 border columns, 2 of padding.
+	listBoxW, detBoxW, bodyH := m.dashboardPaneSizes()
 	const chrome = 4
-	listBoxW := min(66, max(38, m.w*46/100))
-	detBoxW := m.w - listBoxW - 1 // one column of air between the panes
-	if detBoxW < 30 {
-		listBoxW, detBoxW = m.w, 0
-	}
 
 	scope := "recent"
 	if m.showAll {
 		scope = "all"
 	}
 	label := "sessions · " + scope + " · by " + m.sort.String()
+	if m.group != groupNone {
+		label += " · grouped by " + m.group.String()
+	}
+	if m.terminalFocused && m.embedded != "" && m.preparing == nil {
+		label += " · unfocused"
+	}
 	if m.query != "" {
 		label = "search · " + m.query
+		if m.group != groupNone {
+			label += " · grouped by " + m.group.String()
+		}
 	}
 	body := titledPane(label, m.list(listBoxW-chrome, bodyH-3), listBoxW, bodyH)
 
 	if detBoxW > 0 {
 		label := "detail"
-		if s := m.sel(); s != nil && s.Tmux != nil {
-			label = "live · " + s.ShortCwd()
+		var right []string
+		if m.dispatching {
+			label = "dispatch task"
+			right = m.dispatchLines(detBoxW-chrome, bodyH-3)
+		} else if m.preparing != nil {
+			label = "preparing live pane · " + shortDir(m.preparing.cwd)
+			right = m.preparingLines(detBoxW-chrome, bodyH-3)
+		} else if m.embedded != "" {
+			mode := "unfocused"
+			if m.terminalFocused {
+				mode = "focused"
+			}
+			if m.stream != nil && m.stream.Scrolled() {
+				mode = "scrollback"
+			}
+			label = "terminal · " + mode + " · " + shortDir(m.embeddedCwd)
+			right = m.terminalLines(detBoxW-chrome, bodyH-3)
+			if !m.terminalFocused {
+				right = mutedTerminalLines(right)
+			}
+		} else if s := m.sel(); s != nil && s.Tmux != nil {
+			label = "preview · " + s.ShortCwd()
+			if preview := m.selectedTerminalPreview(s, detBoxW-chrome, bodyH-3); preview != nil {
+				right = mutedTerminalLines(preview)
+			}
 		}
-		right := titledPane(label, m.detail(detBoxW-chrome, bodyH-3), detBoxW, bodyH)
+		if right == nil {
+			right = m.detail(detBoxW-chrome, bodyH-3)
+		}
+		rightPane := titledPane(label, right, detBoxW, bodyH)
 		gap := strings.TrimSuffix(strings.Repeat(" \n", lipgloss.Height(body)), "\n")
-		body = lipgloss.JoinHorizontal(lipgloss.Top, body, gap, right)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, body, gap, rightPane)
 	}
 
 	return head + "\n" + body + "\n" + foot
+}
+
+func (m *Model) preparingLines(w, h int) []string {
+	p := m.preparing
+	if p == nil {
+		return nil
+	}
+	var out []string
+	addWrapped := func(prefix, value string, style lipgloss.Style) {
+		for i, line := range wrap(value, max(8, w-lipgloss.Width(prefix))) {
+			lead := prefix
+			if i > 0 {
+				lead = strings.Repeat(" ", lipgloss.Width(prefix))
+			}
+			out = append(out, lead+style.Render(line))
+		}
+	}
+	phase := "PREPARING " + strings.ToUpper(p.agent.String()) + " SESSION"
+	detail := "Orbit is starting the agent inside tmux. The live terminal will appear when the agent is ready."
+	out = append(out, "", paneLabel.Render(m.spin.View()+" "+phase), "")
+	addWrapped("  ", detail, sName)
+	out = append(out, "")
+	addWrapped("  transcript  ", p.title, sMid)
+	addWrapped("  directory   ", p.cwd, sMid)
+	out = append(out, "")
+	addWrapped("  ", "The live pane will receive focus automatically when the session is ready.", sDim)
+	if len(out) > h {
+		out = out[:h]
+	}
+	return out
+}
+
+// dashboardPaneSizes is the single source of truth for both rendering and the
+// tmux client size. If those disagree, the agent paints for one geometry and
+// Orbit clips it into another.
+func (m *Model) dashboardPaneSizes() (listW, detailW, bodyH int) {
+	bodyH = m.h - lipgloss.Height(m.header()) - lipgloss.Height(m.footer())
+	if bodyH < 5 {
+		bodyH = 5
+	}
+	listW = min(66, max(38, m.w*46/100))
+	if m.terminalWide && m.embedded != "" {
+		listW = max(28, m.w*30/100)
+	}
+	detailW = m.w - listW - 1
+	if detailW < 30 {
+		return m.w, 0, bodyH
+	}
+	return listW, detailW, bodyH
+}
+
+func (m *Model) dispatchLines(w, h int) []string {
+	contentW := max(12, w)
+	m.filter.SetWidth(contentW)
+	m.dispatchDir.SetWidth(contentW)
+
+	ag, _, err := parseDispatchPrompt(m.filter.Value(), m.dispatchTo)
+	agent := "@" + m.dispatchTo.String() + " (default)"
+	if err == nil && strings.HasPrefix(strings.TrimSpace(m.filter.Value()), "@") {
+		agent = "@" + ag.String() + " (from task)"
+	}
+	taskLabel, dirLabel := "TASK · FOCUSED", "DIRECTORY"
+	if m.dispatchDirFocused {
+		taskLabel, dirLabel = "TASK", "DIRECTORY · FOCUSED"
+	}
+
+	lines := []string{
+		paneLabel.Render("AGENT") + "  " + agentStyle(ag).Render(agent),
+		sDim.Render(format.Truncate("Use @claude, @codex, or @copilot at the start of the task to override it.", contentW)),
+		"",
+		paneLabel.Render(taskLabel),
+		m.filter.View(),
+		"",
+		paneLabel.Render(dirLabel),
+		m.dispatchDir.View(),
+	}
+	if m.dispatchDirFocused {
+		choices := m.dispatchDirectories()
+		room := max(0, min(5, h-len(lines)-3))
+		if room > 0 && len(choices) > 0 {
+			lines = append(lines, sDim.Render("recent project directories"))
+			for i, dir := range choices[:min(room, len(choices))] {
+				marker, style := "  ", sMid
+				if i == m.dispatchDirCursor {
+					marker, style = "▸ ", sNameOn
+				}
+				lines = append(lines, marker+style.Render(format.Truncate(dir, max(8, contentW-2))))
+			}
+		}
+	}
+	lines = append(lines, "")
+	if m.status != "" && time.Now().Before(m.statusUntil) {
+		lines = append(lines, sErr.Render("▸ "+format.Truncate(m.status, contentW)))
+	} else {
+		lines = append(lines, sDim.Render(format.Truncate("Relative paths use Orbit's working directory; ~ is supported.", contentW)))
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lines
 }
 
 // View wraps the rendered frame in the declarative surface Bubble Tea v2 wants:
@@ -137,11 +274,18 @@ func (m *Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
 	v.WindowTitle = "orbit"
+	// Keep wheel events as mouse messages throughout the dashboard. Turning
+	// mouse mode off on Tab makes many terminals translate the wheel to arrow
+	// keys in the alternate screen, which unexpectedly moves the session list.
+	v.MouseMode = tea.MouseModeCellMotion
+	if m.terminalFocused && m.embedded != "" && m.preparing == nil {
+		v.WindowTitle = "orbit · " + m.embeddedName
+	}
 
 	var needs, working int
 	for _, s := range m.all {
 		switch s.State {
-		case session.NeedsApproval, session.YourTurn:
+		case session.NeedsApproval:
 			needs++
 		case session.Working:
 			working++
@@ -158,6 +302,99 @@ func (m *Model) View() tea.View {
 	return v
 }
 
+func (m *Model) renderEmbedded() string {
+	w, h := m.terminalSize()
+	mode := "FOCUSED"
+	if m.stream != nil && m.stream.Scrolled() {
+		mode = "SCROLLBACK"
+	}
+	title := "  TERMINAL " + mode + " · " + m.embeddedName
+	if m.embeddedCwd != "" {
+		title += " · " + m.embeddedCwd
+	}
+	title = lipgloss.NewStyle().Foreground(cInk).Background(cGreen).Bold(true).
+		Width(w).Render(format.Truncate(title, w))
+
+	screen := strings.Join(m.terminalLines(w, h), "\n")
+	body := lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(screen)
+	helpText := "  Tab/Ctrl+g sessions   Ctrl+f split   Ctrl+e width   wheel/keys → agent"
+	if m.stream != nil && m.stream.Scrolled() {
+		helpText = "  SCROLLBACK · wheel to browse · any key returns to live · Tab sessions"
+	}
+	help := lipgloss.NewStyle().Foreground(cMid).Width(w).Render(helpText)
+	return title + "\n" + body + "\n" + help
+}
+
+func (m *Model) terminalLines(w, h int) []string {
+	screen := "connecting to tmux…"
+	if m.stream != nil && m.stream.Session() == m.embedded {
+		screen = m.stream.Render()
+	} else if m.previewName == m.embedded && m.preview != "" {
+		screen = m.preview
+	}
+	return clippedTerminalLines(screen, w, h)
+}
+
+// selectedTerminalPreview renders a live row through the terminal emulator,
+// rather than feeding its cursor-positioned screen through transcript cleanup.
+// A preview for another session is never reused during an asynchronous switch.
+func (m *Model) selectedTerminalPreview(s *session.Session, w, h int) []string {
+	if s == nil || s.Tmux == nil {
+		return nil
+	}
+	name := s.Tmux.Name
+	if m.stream != nil && m.stream.Session() == name {
+		return clippedTerminalLines(m.stream.Render(), w, h)
+	}
+	if m.previewName == name && m.preview != "" {
+		return clippedTerminalLines(m.preview, w, h)
+	}
+	return nil
+}
+
+func clippedTerminalLines(screen string, w, h int) []string {
+	lines := strings.Split(screen, "\n")
+	if len(lines) > h {
+		lines = lines[len(lines)-h:]
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(strings.TrimSuffix(lines[i], "\r"), w, "")
+	}
+	return lines
+}
+
+// mutedTerminalLines removes the application's own colours before applying a
+// single subdued foreground. This makes input ownership obvious and avoids an
+// unfocused agent prompt looking just as actionable as the selected list row.
+func mutedTerminalLines(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = sDim.Render(ansi.Strip(line))
+	}
+	return out
+}
+
+func (m *Model) terminalMousePosition(x, y int) (int, int, bool) {
+	if !m.terminalFocused || m.embedded == "" {
+		return 0, 0, false
+	}
+	if m.terminalZoom {
+		px, py := x, y-1 // the focused-terminal title owns row zero
+		w, h := m.terminalSize()
+		return px, py, px >= 0 && px < w && py >= 0 && py < h
+	}
+	listW, detailW, bodyH := m.dashboardPaneSizes()
+	if detailW == 0 {
+		return 0, 0, false
+	}
+	bodyTop := lipgloss.Height(m.header())
+	// The right pane begins after the list and one-column gap. Its border and
+	// horizontal padding consume two more columns; its title consumes one row.
+	px, py := x-(listW+3), y-(bodyTop+1)
+	w, h := m.terminalSize()
+	return px, py, px >= 0 && px < w && py >= 0 && py < h && y < bodyTop+bodyH
+}
+
 // titledPane draws the pane label into the top border rule, the way most
 // modern TUIs do it — lipgloss v1 has no border titles, so the top edge is
 // drawn by hand and the box below it renders without one.
@@ -172,37 +409,26 @@ func titledPane(title string, lines []string, w, h int) string {
 }
 
 func (m *Model) header() string {
-	var working, needs, turn, shell int
+	var working, needs int
 	for _, s := range m.all {
 		switch s.State {
 		case session.Working:
 			working++
 		case session.NeedsApproval:
 			needs++
-		case session.YourTurn:
-			turn++
-		case session.ShellOnly:
-			shell++
 		}
 	}
 
-	var pills []string
+	var metrics []string
 	if needs > 0 {
-		pills = append(pills, pill("▲", format.Itoa(needs)+" needs you", cAmber))
-	}
-	if turn > 0 {
-		pills = append(pills, pill("◆", format.Itoa(turn)+" your turn", cCyan))
+		metrics = append(metrics, statusMetric("▲", "needs attention", needs, cAmber))
 	}
 	if working > 0 {
-		pills = append(pills, pill("●", format.Itoa(working)+" working", cBright))
-	}
-	if shell > 0 {
-		pills = append(pills, pill("○", format.Itoa(shell)+" idle", cGreen))
+		metrics = append(metrics, statusMetric("●", "working", working, cBright))
 	}
 
-	if len(pills) == 0 {
-		pills = append(pills, lipgloss.NewStyle().Foreground(cDim).
-			Padding(0, 1).Render("nothing running"))
+	if len(metrics) == 0 {
+		metrics = append(metrics, sDim.Render("no active work"))
 	}
 
 	// Spell the mapping out: the two-letter tags in the list are only obvious
@@ -225,25 +451,58 @@ func (m *Model) header() string {
 
 	art := banner(m.w, m.h)
 	stats := []string{
-		strings.Join(pills, " "),
-		m.coverageBar(),
+		strings.Join(metrics, sDim.Render("  ·  ")),
 		tagline.Render(format.Itoa(len(m.view))+" of "+format.Itoa(len(m.all))+" shown") +
 			tagline.Render("  ·  ") + strings.Join(legend, tagline.Render(" · ")),
 	}
-	if m.filtering || m.filter.Value() != "" {
+	if !m.dispatching && (m.filtering || m.filter.Value() != "") {
 		stats = append(stats, m.filter.View())
 	}
 
 	left := lipgloss.NewStyle().PaddingLeft(1).Render(strings.Join(art, "\n"))
-	// Sit the stats on the baseline of the logo rather than floating mid-air.
-	right := lipgloss.NewStyle().PaddingLeft(3).PaddingTop(max(0, len(art)-len(stats)-1)).
-		Render(strings.Join(stats, "\n"))
+	rightW := max(1, m.w-lipgloss.Width(left))
+	rightH := max(len(art), len(stats))
+	rightLines := make([]string, rightH)
+
+	// Metrics sit on the logo's baseline. A transient notice owns the first
+	// row at the far right without adding a row or moving the dashboard.
+	metricTop := max(0, len(art)-len(stats)-1)
+	if notice, style := m.headerNotice(); notice != "" {
+		if metricTop == 0 {
+			metricTop = 1
+		}
+		text := style.Render("◆ " + format.Truncate(notice, max(1, rightW-2)))
+		rightLines[0] = lipgloss.NewStyle().Width(rightW).Align(lipgloss.Right).Render(text)
+	}
+	for i, stat := range stats {
+		row := metricTop + i
+		if row >= len(rightLines) {
+			break
+		}
+		rightLines[row] = "   " + ansi.Truncate(stat, max(1, rightW-3), "")
+	}
+	right := strings.Join(rightLines, "\n")
 
 	head := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	if lipgloss.Width(head) > m.w {
 		head = lipgloss.NewStyle().MaxWidth(m.w).Render(head)
 	}
 	return head
+}
+
+// headerNotice returns short-lived feedback for the header's notification
+// slot. Modes with their own persistent feedback keep using their local pane
+// or footer and do not duplicate the same message here.
+func (m *Model) headerNotice() (string, lipgloss.Style) {
+	if m.status == "" || time.Now().After(m.statusUntil) || m.updating ||
+		m.preparing != nil || m.dispatching || m.filtering {
+		return "", lipgloss.Style{}
+	}
+	style := sHead
+	if strings.Contains(m.status, "failed") || strings.Contains(m.status, "not installed") {
+		style = sErr
+	}
+	return m.status, style
 }
 
 // coverageBar is the global summary progress: filled by sessions that have a
@@ -253,7 +512,7 @@ func (m *Model) coverageBar() string {
 	if total == 0 || !m.cfg.Summary.Enabled {
 		return ""
 	}
-	m.prog.SetWidth(28)
+	m.prog.SetWidth(12)
 	label := format.Itoa(done) + "/" + format.Itoa(total) + " summarised"
 	if inflight > 0 {
 		label += sDim.Render("  ") + sTok.Render(m.spin.View()+" "+format.Itoa(inflight)+" queued")
@@ -262,41 +521,80 @@ func (m *Model) coverageBar() string {
 }
 
 func (m *Model) list(w, h int) []string {
-	rows := h / 2
-	if rows < 1 {
-		rows = 1
-	}
+	showGroups := m.group != groupNone && h >= 3
 	if m.cursor < m.top {
 		m.top = m.cursor
-	}
-	if m.cursor >= m.top+rows {
-		m.top = m.cursor - rows + 1
-	}
-	if m.top > max(0, len(m.view)-rows) {
-		m.top = max(0, len(m.view)-rows)
 	}
 
 	if len(m.view) == 0 {
 		return []string{"", sDim.Render("  nothing matches — press a to show everything")}
 	}
+	if m.top >= len(m.view) {
+		m.top = len(m.view) - 1
+	}
+	// Headings consume a real line. Move the viewport by session until the
+	// selected row and every heading before it fit, rather than estimating the
+	// pane as h/2 rows and letting group labels overflow the bottom border.
+	for m.top < m.cursor && m.listSpanHeight(m.top, m.cursor, showGroups) > h {
+		m.top++
+	}
 
 	var out []string
+	counts := make(map[string]int)
+	if showGroups {
+		for _, s := range m.view {
+			counts[groupKey(s, m.group)]++
+		}
+	}
 	lastGroup := ""
-	for i := m.top; i < len(m.view) && i < m.top+rows; i++ {
+	haveGroup := false
+	i := m.top
+	for ; i < len(m.view); i++ {
 		s := m.view[i]
-		if m.group {
-			if g := s.ShortCwd(); g != lastGroup {
-				lastGroup = g
-				out = append(out, sGroup.Render("▸ "+format.Truncate(g, w-2)))
-			}
+		key := groupKey(s, m.group)
+		needsHead := showGroups && (!haveGroup || key != lastGroup)
+		need := 2
+		if needsHead {
+			need++
+		}
+		if len(out)+need > h {
+			break
+		}
+		if needsHead {
+			lastGroup, haveGroup = key, true
+			label := m.groupLabel(s) + " · " + format.Itoa(counts[key])
+			out = append(out, sGroup.Render("▸ "+format.Truncate(label, w-2)))
 		}
 		out = append(out, m.row(s, i == m.cursor, w)...)
 	}
 	// A scroll hint beats silently truncating the list.
-	if more := len(m.view) - (m.top + rows); more > 0 && len(out) < h {
+	if more := len(m.view) - i; more > 0 && len(out) < h {
 		out = append(out, sDim.Render("  + "+format.Itoa(more)+" more"))
 	}
 	return out
+}
+
+func (m *Model) listSpanHeight(start, end int, showGroups bool) int {
+	height := 0
+	lastGroup := ""
+	haveGroup := false
+	for i := start; i <= end && i < len(m.view); i++ {
+		if showGroups {
+			if key := groupKey(m.view[i], m.group); !haveGroup || key != lastGroup {
+				lastGroup, haveGroup = key, true
+				height++
+			}
+		}
+		height += 2
+	}
+	return height
+}
+
+func (m *Model) groupLabel(s *session.Session) string {
+	if m.group == groupAgent {
+		return s.Agent.String()
+	}
+	return s.ShortCwd()
 }
 
 // row renders one session as two lines. Selection is a filled background rather
@@ -321,9 +619,12 @@ func (m *Model) row(s *session.Session, sel bool, w int) []string {
 	when := format.RelTime(s.Modified)
 	headW := w - 2 - len([]rune(when)) - 1
 	cwd := format.Pad(format.Truncate(s.ShortCwd(), headW-5), headW-5)
-	icon := s.State.Icon()
-	if s.State == session.Working {
+	visualState := s.State
+	preparing := m.preparing != nil && m.preparing.id == s.ID && m.preparing.agent == s.Agent
+	icon := visualState.Icon()
+	if visualState == session.Working || preparing {
 		icon = m.spin.View() // a still dot reads as stalled; motion reads as busy
+		visualState = session.Working
 	}
 	// In logo mode the agent cell is raw escape codes: the foreground colour
 	// encodes the Kitty image id, so lipgloss must not restyle it.
@@ -336,11 +637,14 @@ func (m *Model) row(s *session.Session, sel bool, w int) []string {
 		tag = LogoCells(s.Agent, selBG)
 	}
 	line1 := bar +
-		paint(stateStyle(s.State), icon) + base.Render(" ") +
+		paint(stateStyle(visualState), icon) + base.Render(" ") +
 		tag + base.Render(" ") +
 		paint(sMid, cwd) + base.Render(" ") + paint(sDim, when)
 
 	label := s.State.Label()
+	if preparing {
+		label = "preparing"
+	}
 	nameW := w - 4 - len([]rune(label))
 	if label != "" {
 		nameW--
@@ -351,7 +655,7 @@ func (m *Model) row(s *session.Session, sel bool, w int) []string {
 	}
 	line2 := bar + base.Render("  ") + paint(nameStyle, format.Pad(format.Truncate(format.Clean(s.Name()), nameW), nameW))
 	if label != "" {
-		line2 += base.Render(" ") + paint(stateStyle(s.State), label)
+		line2 += base.Render(" ") + paint(stateStyle(visualState), label)
 	}
 	return []string{line1, line2}
 }
@@ -367,7 +671,11 @@ func (m *Model) detail(w, h int) []string {
 	add(sNameOn.Render(format.Truncate(format.Clean(s.Name()), w)))
 	add(sDim.Render(format.Truncate(s.Cwd, w)))
 
-	meta := []string{agentStyle(s.Agent).Render(s.Agent.String())}
+	agent := agentStyle(s.Agent).Render(s.Agent.String())
+	if m.icons == IconLogo {
+		agent = LogoCells(s.Agent, "") + " " + agent
+	}
+	meta := []string{agent}
 	if s.Branch != "" {
 		meta = append(meta, sMid.Render(format.Truncate(s.Branch, 24)))
 	}
@@ -383,7 +691,7 @@ func (m *Model) detail(w, h int) []string {
 	meta = append(meta, sMid.Render(format.RelTime(s.Modified)+" ago"))
 	line := strings.Join(meta, sDim.Render(" · "))
 	if lbl := s.State.Label(); lbl != "" {
-		line += "  " + pill(s.State.Icon(), lbl, stateColor(s.State))
+		line += "  " + stateMarker(s.State.Icon(), lbl, stateColor(s.State))
 	}
 	add(line, "")
 
@@ -494,34 +802,122 @@ func (m *Model) footer() string {
 	if m.updating {
 		return " " + sHead.Render(m.spin.View()+" "+m.status)
 	}
-	if m.status != "" && time.Now().Before(m.statusUntil) {
-		st := sHead
-		if strings.Contains(m.status, "failed") || strings.Contains(m.status, "not installed") {
-			st = sErr
+	if m.preparing != nil {
+		p := m.preparing
+		elapsed := int(time.Since(p.started).Seconds())
+		return " " + sHead.Render(m.spin.View()+" preparing "+p.agent.String()+" live pane") +
+			sDim.Render("  ·  "+format.Itoa(elapsed)+"s  ·  it will open automatically")
+	}
+	if m.dispatching {
+		return m.footerLine([][2]string{
+			{"tab", "switch field"}, {"↑↓", "directory"}, {"⏎", "accept"}, {"esc", "cancel"},
+		})
+	}
+	if m.showHelp {
+		return m.footerLine([][2]string{{"?", "close shortcuts"}, {"esc", "close"}})
+	}
+	if m.terminalFocused && m.embedded != "" {
+		mode := "widen"
+		if m.terminalWide {
+			mode = "normal width"
 		}
-		return " " + st.Render("▸ "+m.status)
+		zoom := "full screen"
+		if m.terminalZoom {
+			zoom = "split view"
+		}
+		keys := [][2]string{{"tab", "sessions"}, {"ctrl+f", zoom}, {"ctrl+e", mode}}
+		return m.footerLine(keys)
 	}
 	keys := [][2]string{
-		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"d", "dispatch"},
-		{"s/S", "sum/all"}, {"f", "search"}, {"/", "filter"}, {"o", "sort"},
-		{"p", "group"}, {"x", "kill"}, {"a", "all"}, {"q", "quit"},
+		{"⏎", "attach"}, {"tab", "drive"}, {"?", "shortcuts"}, {"/", "filter"},
+		{"n", "new"}, {"d", "dispatch"},
 	}
-	if term.CanTab() {
-		keys = append(keys[:2], append([][2]string{{"w", "window"}}, keys[2:]...)...)
+	return m.footerLine(keys)
+}
+
+func (m *Model) footerLine(keys [][2]string) string {
+	right := m.coverageBar()
+	available := m.w
+	if right != "" {
+		available -= lipgloss.Width(right) + 2
 	}
+	available = max(1, available)
+
 	var ps []string
 	for _, k := range keys {
 		ps = append(ps, keyCap.Render(k[0])+" "+keyLabel.Render(k[1]))
 	}
-	foot := " " + strings.Join(ps, sDim.Render("  "))
-	if lipgloss.Width(foot) > m.w {
-		// Drop trailing keys rather than wrapping into a second row.
-		for len(ps) > 3 && lipgloss.Width(foot) > m.w {
+	left := " " + strings.Join(ps, sDim.Render("  "))
+	for len(ps) > 1 && lipgloss.Width(left) > available {
+		ps = ps[:len(ps)-1]
+		left = " " + strings.Join(ps, sDim.Render("  ")) + sDim.Render(" …")
+	}
+	if lipgloss.Width(left) > available {
+		left = ansi.Truncate(left, available, "")
+	}
+	if right == "" {
+		return left
+	}
+	if lipgloss.Width(right) >= m.w {
+		return lipgloss.NewStyle().Width(m.w).Align(lipgloss.Right).
+			Render(ansi.Truncate(right, m.w, ""))
+	}
+	gap := max(1, m.w-lipgloss.Width(left)-lipgloss.Width(right))
+	line := left + strings.Repeat(" ", gap) + right
+	if lipgloss.Width(line) > m.w {
+		for len(ps) > 1 && lipgloss.Width(line) > m.w {
 			ps = ps[:len(ps)-1]
-			foot = " " + strings.Join(ps, sDim.Render("  ")) + sDim.Render(" …")
+			left = " " + strings.Join(ps, sDim.Render("  ")) + sDim.Render(" …")
+			gap = max(1, m.w-lipgloss.Width(left)-lipgloss.Width(right))
+			line = left + strings.Repeat(" ", gap) + right
 		}
 	}
-	return foot
+	return line
+}
+
+func (m *Model) shortcutHelp(w, h int) []string {
+	type binding struct{ key, label string }
+	type pair [2]binding
+	entry := func(b binding) string {
+		return keyCap.Render(b.key) + " " + keyLabel.Render(b.label)
+	}
+	row := func(left, right binding) []string {
+		if w < 64 {
+			return []string{entry(left), entry(right)}
+		}
+		column := max(1, w/2)
+		return []string{lipgloss.NewStyle().Width(column).MaxWidth(column).Render(entry(left)) + entry(right)}
+	}
+	var lines []string
+	section := func(title string, pairs ...pair) {
+		lines = append(lines, paneLabel.Render(title))
+		for _, p := range pairs {
+			lines = append(lines, row(p[0], p[1])...)
+		}
+	}
+	section("NAVIGATE",
+		pair{binding{"↑ / k", "previous session"}, binding{"↓ / j", "next session"}},
+		pair{binding{"g", "first session"}, binding{"G", "last session"}},
+	)
+	section("SESSIONS",
+		pair{binding{"⏎", "attach"}, binding{"tab", "focus live pane"}},
+		pair{binding{"i", "attach here"}, binding{"t", "open in new tab"}},
+		pair{binding{"w", "open in new window"}, binding{"n", "new session"}},
+		pair{binding{"d", "dispatch task"}, binding{"x", "kill live session"}},
+	)
+	section("FIND & ORGANIZE",
+		pair{binding{"/", "filter list"}, binding{"f", "search transcripts"}},
+		pair{binding{"o / p", "sort / group"}, binding{"a", "all / recent"}},
+		pair{binding{"s / S", "summary / visible"}, binding{"r", "refresh"}},
+	)
+	section("LIVE PANE & APP",
+		pair{binding{"tab / ctrl+g", "sessions"}, binding{"ctrl+f", "full screen"}},
+		pair{binding{"ctrl+e", "toggle width"}, binding{"q", "quit"}},
+	)
+	if len(lines) > h {
+		lines = lines[:max(0, h)]
+	}
+	return lines
 }
 
 func wrap(s string, w int) []string {

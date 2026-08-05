@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 
 	"github.com/sadrig91/orbit/internal/tmux"
@@ -188,6 +189,95 @@ func (c *Conn) SetOutput(on bool) error {
 // relayed — orbit still originates nothing on its own.
 func (c *Conn) SendKeys(pane, keys string) error {
 	_, err := c.Command(fmt.Sprintf("send-keys -t %s %s", pane, keys))
+	return err
+}
+
+// SendText sends arbitrary UTF-8 without letting tmux interpret any part of
+// it as a key name or command syntax.
+//
+// This deliberately uses send-keys -H rather than quoting text into a tmux
+// command. The command parser has its own quoting rules, while input here may
+// contain quotes, semicolons, newlines and control bytes from bracketed paste.
+// -H accepts hexadecimal bytes, so the command itself contains only a fixed
+// vocabulary plus [0-9a-f]. UTF-8 is sent as its constituent bytes.
+func (c *Conn) SendText(pane, value string) error {
+	const chunk = 512
+	b := []byte(value)
+	for len(b) > 0 {
+		n := min(chunk, len(b))
+		args := make([]string, 0, n)
+		for _, v := range b[:n] {
+			args = append(args, fmt.Sprintf("%02x", v))
+		}
+		if _, err := c.Command("send-keys -H -t " + pane + " " + strings.Join(args, " ")); err != nil {
+			return err
+		}
+		b = b[n:]
+	}
+	return nil
+}
+
+// WheelDirection is the direction of one physical mouse-wheel event.
+type WheelDirection int
+
+const (
+	WheelUp   WheelDirection = 1
+	WheelDown WheelDirection = -1
+)
+
+type paneInputMode struct {
+	mouse, sgr, alternate bool
+}
+
+func (c *Conn) inputMode(pane string) (paneInputMode, error) {
+	out, err := c.Command("display-message -p -t " + pane +
+		" '#{mouse_any_flag} #{mouse_sgr_flag} #{alternate_on}'")
+	if err != nil {
+		return paneInputMode{}, err
+	}
+	if len(out) == 0 {
+		return paneInputMode{}, errors.New("tmux did not report pane input mode")
+	}
+	flags := strings.Fields(out[0])
+	if len(flags) != 3 {
+		return paneInputMode{}, fmt.Errorf("unexpected pane input mode %q", out[0])
+	}
+	return paneInputMode{mouse: flags[0] == "1", sgr: flags[1] == "1", alternate: flags[2] == "1"}, nil
+}
+
+// sendWheel forwards one wheel event to an application. Normal-screen
+// scrollback is deliberately handled by Pane: tmux copy mode belongs to the
+// control client and its viewport is not part of the streamed pane output.
+func (c *Conn) sendWheel(pane string, x, y int, direction WheelDirection, mode paneInputMode) error {
+	if mode.mouse {
+		button := ansi.MouseWheelUp
+		if direction == WheelDown {
+			button = ansi.MouseWheelDown
+		}
+		encoded := ansi.EncodeMouseButton(button, false, false, false, false)
+		seq := ansi.MouseX10(encoded, x, y)
+		if mode.sgr {
+			seq = ansi.MouseSgr(encoded, x, y, false)
+		}
+		return c.SendText(pane, seq)
+	}
+
+	if mode.alternate {
+		key := "Up"
+		if direction == WheelDown {
+			key = "Down"
+		}
+		_, err := c.Command(fmt.Sprintf("send-keys -N 3 -t %s %s", pane, key))
+		return err
+	}
+	return nil
+}
+
+// Resize tells tmux the dimensions of this control-mode client. It is only
+// used while Orbit is explicitly driving a pane; the read-only dashboard
+// preview keeps observing the pane at its existing size.
+func (c *Conn) Resize(width, height int) error {
+	_, err := c.Command(fmt.Sprintf("refresh-client -C %dx%d", width, height))
 	return err
 }
 

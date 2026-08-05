@@ -31,6 +31,8 @@ type Session struct {
 	Title        string
 	Cwd          string
 	TabID        string // terminal tab last opened for it, or "" — see SetTab
+	Pending      bool   // waiting for a newly created transcript to identify itself
+	Known        string // comma-separated session ids that predated this launch
 }
 
 func ConfPath() string { return format.Home(".config", "orbit", "tmux.conf") }
@@ -90,12 +92,12 @@ func output(args ...string) ([]byte, error) {
 
 const listFmt = "#{session_name}\x1f#{@orbit_session}\x1f#{@orbit_agent}\x1f#{session_attached}\x1f" +
 	"#{session_activity}\x1f#{pane_current_command}\x1f#{@orbit_title}\x1f#{session_path}\x1f#{session_created}\x1f" +
-	"#{@orbit_tab}"
+	"#{@orbit_tab}\x1f#{@orbit_pending}\x1f#{@orbit_known}"
 
 // Field separator, and the number of fields listFmt asks for.
 const (
 	fieldSep   = "\x1f"
-	listFields = 10
+	listFields = 12
 )
 
 // Not every tmux hands the separator back the way it was sent. 3.4 — what
@@ -122,6 +124,43 @@ func splitFields(line string, want int) []string {
 var shells = map[string]bool{
 	"zsh": true, "-zsh": true, "bash": true, "-bash": true, "sh": true,
 	"fish": true, "login": true, "tmux": true, "": true,
+}
+
+const (
+	agentReadyTimeout = 30 * time.Second
+	agentReadyStable  = 200 * time.Millisecond
+	agentReadyPoll    = 40 * time.Millisecond
+)
+
+// WaitForAgent waits until the command typed by Spawn has actually replaced
+// the login shell. A tmux session existing is not the same as an agent being
+// ready: revealing at that earlier boundary shows the resume command, shell
+// prompt, and startup redraws before the agent takes over.
+func WaitForAgent(name string) error {
+	deadline := time.Now().Add(agentReadyTimeout)
+	var runningSince time.Time
+	for time.Now().Before(deadline) {
+		out, err := output("display-message", "-p", "-t", name, "#{pane_current_command}")
+		if err != nil {
+			return fmt.Errorf("check agent readiness: %w", err)
+		}
+		command := strings.TrimSpace(string(out))
+		if !shells[command] {
+			if runningSince.IsZero() {
+				runningSince = time.Now()
+			} else if time.Since(runningSince) >= agentReadyStable {
+				// The clear sequence removes the launch line from the current
+				// screen; clear-history removes its earlier echoed copies so the
+				// same command does not reappear when Orbit scrollback opens.
+				_ = run("clear-history", "-t", name)
+				return nil
+			}
+		} else {
+			runningSince = time.Time{}
+		}
+		time.Sleep(agentReadyPoll)
+	}
+	return fmt.Errorf("agent did not take over tmux session %s within %s", name, agentReadyTimeout)
 }
 
 // List returns every live orbit session. Sessions started with `n` have no
@@ -208,7 +247,16 @@ func parseListLine(line string) (*Session, bool) {
 		Title:        f[6],
 		Cwd:          f[7],
 		TabID:        f[9],
+		Pending:      f[10] == "1",
+		Known:        f[11],
 	}, true
+}
+
+// launchLine clears the echoed shell command before starting the agent. Orbit
+// does not reveal the pane until later, but without this clear the large 220x60
+// startup screen can still retain "codex resume …" when it is resized.
+func launchLine(cmd string) string {
+	return `printf '\033[2J\033[H'; ` + cmd
 }
 
 // Spawn creates a detached session and types cmd into it.
@@ -226,9 +274,14 @@ func Spawn(name, cwd, cmd, title, agent, sessionID string) error {
 	run("set-option", "-t", name, "@orbit_title", title)
 	if sessionID != "" {
 		run("set-option", "-t", name, "@orbit_session", sessionID)
+	} else {
+		// No transcript exists yet. Marking the tmux session before the shell
+		// starts closes the scan race: the dashboard must not guess that some
+		// unrelated active transcript in the same directory belongs to it.
+		run("set-option", "-t", name, "@orbit_pending", "1")
 	}
 	time.Sleep(Delay("ORBIT_SPAWN_DELAY", 900*time.Millisecond))
-	return run("send-keys", "-t", name, cmd, "Enter")
+	return run("send-keys", "-t", name, launchLine(cmd), "Enter")
 }
 
 func UniqueName(base string) string {
@@ -260,6 +313,20 @@ func Capture(name string, lines int) string {
 // Link records which transcript a session turned out to be writing to.
 func Link(name, sessionID string) {
 	run("set-option", "-t", name, "@orbit_session", sessionID)
+	run("set-option", "-u", "-t", name, "@orbit_pending")
+	run("set-option", "-u", "-t", name, "@orbit_known")
+}
+
+// SetKnown records the conversations that already existed when an interactive
+// session was launched. A later scan may then link only a transcript not in
+// this set. Keeping it on the tmux session makes the join survive restarting
+// Orbit before the first prompt is sent.
+func SetKnown(name string, ids []string) {
+	value := strings.Join(ids, ",")
+	if value == "" {
+		value = "-" // recorded empty baseline, distinct from not recorded yet
+	}
+	run("set-option", "-t", name, "@orbit_known", value)
 }
 
 // Retitle keeps the tab label in sync as the agent renames the session.

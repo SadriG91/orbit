@@ -33,7 +33,7 @@ import (
 // prompt has been sitting. No PreToolUse: it precedes the permission gate,
 // so it adds a subprocess per tool call and no information. SessionStart is
 // limited to startup|resume|clear because it also fires on compaction, in
-// the middle of a working turn, where "your turn" would be a lie — and it is
+// the middle of a working turn, where "finished" would be a lie — and it is
 // subscribed at all because a resumed session must overwrite whatever the
 // previous run's state file claimed before it died.
 var claudeEvents = []struct {

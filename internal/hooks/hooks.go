@@ -1,6 +1,6 @@
 // Package hooks turns agent hook events into session state.
 //
-// The transcripts cannot say whether a session needs you. A permission prompt
+// The transcripts cannot say whether a session needs attention. A permission prompt
 // is not written to them at all, and their last word during any tool call is
 // the same either way — a call without a result — so inference has to wait
 // and see whether anything moves. Measured over 8,327 real tool calls, that
