@@ -81,8 +81,10 @@ type (
 		err string
 	}
 	paneDirtyMsg struct{}
-	statusMsg    string
-	searchMsg    struct {
+	// paneGoneMsg says the control client has ended and will send nothing more.
+	paneGoneMsg struct{}
+	statusMsg   string
+	searchMsg   struct {
 		query   string
 		matches map[string]search.Match
 	}
@@ -127,7 +129,7 @@ type Model struct {
 	// mode costs one attempt rather than one per cursor movement, and
 	// streamOpening single-flights the dial — capture runs on every tick, and
 	// a handshake that outlasts one would otherwise start a second client.
-	stream        *pane.Pane
+	stream        livePane
 	streamOff     bool
 	streamOpening bool
 
@@ -284,8 +286,15 @@ func (m *Model) recoverStuckScan() tea.Cmd {
 	m.scanGen++
 	m.ix = session.NewIndex()
 	m.scanning = false
-	m.say("a scan stopped responding after " +
-		format.Itoa(int(time.Since(m.scanStart).Seconds())) + "s — restarting it")
+	// The one moment worth mentioning the goroutine dump: something inside
+	// orbit has stopped responding, and this is as close as it gets to
+	// catching it while it is still wedged.
+	msg := "a scan stopped responding after " +
+		format.Itoa(int(time.Since(m.scanStart).Seconds())) + "s — restarting it"
+	if m.dumpPath != "" {
+		msg += "; kill -USR1 for stacks in " + m.dumpPath
+	}
+	m.say(msg)
 	return m.scanCmd()
 }
 
@@ -413,13 +422,37 @@ func (m *Model) followCmd(name string) tea.Cmd {
 	}
 }
 
-// waitForPaneCmd blocks until the emulator's screen changes. Re-issued on each
-// wakeup, this is what replaces polling: the redraw rate follows the output
-// rather than a timer, and nothing is missed between samples.
-func waitForPaneCmd(p *pane.Pane) tea.Cmd {
+// livePane is what the Model needs from a streaming pane.
+//
+// An interface rather than *pane.Pane so the failure paths can be exercised
+// without a tmux server — a connection that dies mid-session is precisely
+// where this went wrong, and precisely what a real pane makes hard to arrange.
+type livePane interface {
+	Session() string
+	Text() string
+	Switch(string) error
+	Dirty() <-chan struct{}
+	Done() <-chan struct{}
+	Close() error
+}
+
+// waitForPaneCmd blocks until the screen changes, or until there will never be
+// another change. Re-issued on each wakeup, this is what replaces polling: the
+// redraw rate follows the output rather than a timer.
+//
+// Waiting on Dirty alone would be a trap. A control client that dies sends one
+// final wakeup and then nothing, so the next wait blocks forever on a screen
+// that cannot move — and because the Model still holds a stream, capture never
+// falls back to polling. The preview would stay frozen on its last frame for
+// the rest of the session, with no error and nothing to notice.
+func waitForPaneCmd(p livePane) tea.Cmd {
 	return func() tea.Msg {
-		<-p.Dirty()
-		return paneDirtyMsg{}
+		select {
+		case <-p.Dirty():
+			return paneDirtyMsg{}
+		case <-p.Done():
+			return paneGoneMsg{}
+		}
 	}
 }
 
@@ -809,6 +842,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.preview, m.previewName = m.stream.Text(), m.stream.Session()
 		return m, waitForPaneCmd(m.stream)
+
+	case paneGoneMsg:
+		if m.stream == nil {
+			return m, nil
+		}
+		// Keep the last screen it managed rather than blanking the pane, then
+		// let go of it so capture starts polling again.
+		m.preview, m.previewName = m.stream.Text(), m.stream.Session()
+		m.stream.Close()
+		m.stream = nil
+		// Not latched off: a client dies when the tmux server goes away, and
+		// dialling again is how the preview comes back if it returns. A server
+		// that is really gone makes the next dial fail, which does latch — so
+		// this recovers without being able to spin.
+		return m, m.capture()
 
 	case statusMsg:
 		m.say(string(msg))
