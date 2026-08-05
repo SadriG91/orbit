@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/session"
 )
@@ -181,5 +182,58 @@ func TestPruneLeavesAgentsThatReportedNothingAlone(t *testing.T) {
 	}
 	if _, ok := Load(codex); !ok {
 		t.Error("deleted a Codex summary on the strength of a store that failed to open")
+	}
+}
+
+// A failing summariser has to say why. exec reports "exit status 1" and keeps
+// the CLI's own complaint on the error value, so the reason a summary failed —
+// a model the account isn't allowed, an expired login — never reached the
+// status line. The shipped codex command was rejected by ChatGPT-account
+// logins for exactly this long without anyone being able to see it.
+func TestGenerateReportsWhatTheCLISaid(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	if err := os.WriteFile(path, []byte(
+		`{"type":"user","message":{"content":"hello"},"timestamp":"2026-08-05T10:00:00Z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{Agent: session.Claude, ID: "x", Path: path, Msgs: 1}
+
+	// A stand-in CLI that fails the way a real one does: a warning first, then
+	// the actual complaint, then a non-zero exit.
+	cfg := config.Summary{Claude: config.Provider{Command: []string{
+		"sh", "-c", "echo 'warning: some metadata thing' >&2; " +
+			"echo \"ERROR: the 'gpt-5-mini' model is not supported\" >&2; exit 1",
+	}}}
+
+	_, err := Generate(s, cfg)
+	if err == nil {
+		t.Fatal("a failing summariser reported success")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("error = %q, want the CLI's own message", err)
+	}
+	if err.Error() == "exit status 1" {
+		t.Error("still reporting the bare exit status")
+	}
+	// The last line is the error; the warning before it is noise.
+	if strings.Contains(err.Error(), "some metadata thing") {
+		t.Errorf("error carried the leading warning instead of the failure: %q", err)
+	}
+}
+
+func TestLastLine(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"only line", "only line"},
+		{"warning\nERROR: real problem", "ERROR: real problem"},
+		{"trailing blanks\nreal\n\n  \n", "real"},
+		{"", ""},
+		{"   \n  \n", ""},
+	}
+	for _, tt := range tests {
+		if got := lastLine([]byte(tt.in)); got != tt.want {
+			t.Errorf("lastLine(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
