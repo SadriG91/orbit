@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/term"
@@ -386,6 +387,36 @@ func (m *Model) detail(w, h int) []string {
 	}
 	add(line, "")
 
+	// Above the summary, because a dispatch is what is happening now and a
+	// summary is what happened before it.
+	if d := s.Dispatch; d != nil {
+		label, detail := dispatchLine(d)
+		head := paneLabel.Render("▸ " + label)
+		if d.Status == dispatch.Running {
+			head += sDim.Render("  ") + sMid.Render(m.spin.View())
+		}
+		add(head)
+		if detail != "" {
+			style := sName
+			switch d.Status {
+			case dispatch.NeedsYou:
+				style = sHit
+			case dispatch.Failed:
+				style = sErr
+			}
+			for _, l := range wrap(format.Clean(detail), w-2) {
+				add("  " + style.Render(l))
+			}
+		}
+		for _, l := range wrap(format.Clean("⇢ "+d.Prompt), w-2) {
+			add("  " + sDim.Render(l))
+		}
+		if d.Status == dispatch.NeedsYou {
+			add("  " + sMid.Render("⏎ takes it over where it stopped"))
+		}
+		add("")
+	}
+
 	if rec, ok := m.summaries[s.ID]; ok {
 		head := paneLabel.Render("▸ summary")
 		// Say plainly when the summary predates the latest turns, rather than
@@ -471,9 +502,9 @@ func (m *Model) footer() string {
 		return " " + st.Render("▸ "+m.status)
 	}
 	keys := [][2]string{
-		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"s/S", "sum/all"},
-		{"f", "search"}, {"/", "filter"}, {"o", "sort"}, {"p", "group"},
-		{"x", "kill"}, {"a", "all"}, {"q", "quit"},
+		{"⏎", "attach"}, {"i", "here"}, {"n", "new"}, {"d", "dispatch"},
+		{"s/S", "sum/all"}, {"f", "search"}, {"/", "filter"}, {"o", "sort"},
+		{"p", "group"}, {"x", "kill"}, {"a", "all"}, {"q", "quit"},
 	}
 	if term.CanTab() {
 		keys = append(keys[:2], append([][2]string{{"w", "window"}}, keys[2:]...)...)

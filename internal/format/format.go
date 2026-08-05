@@ -132,3 +132,37 @@ func Home(rest ...string) string {
 	h, _ := os.UserHomeDir()
 	return filepath.Join(append([]string{h}, rest...)...)
 }
+
+// WriteAtomic writes a file by creating it beside the target and renaming over
+// it, so a reader can never see half of one.
+//
+// Everything orbit writes to its cache is read by something polling on a timer
+// — the scan runs every couple of seconds — which makes a torn read routine
+// rather than rare. The temp file goes in the destination directory because
+// rename is only atomic within a filesystem, and it is removed on every failure
+// path so a crashing writer leaves no litter behind.
+func WriteAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op once the rename has succeeded
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// CreateTemp opens 0600; anything wider has to be asked for explicitly.
+	if perm != 0o600 {
+		if err := os.Chmod(tmp.Name(), perm); err != nil {
+			return err
+		}
+	}
+	return os.Rename(tmp.Name(), path)
+}

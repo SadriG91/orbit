@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/term"
@@ -88,6 +89,10 @@ func resumeSession(s *session.Session) (string, error) {
 	// stand indefinitely. SessionStart re-establishes state when the hooks
 	// are live; this covers the runs where they won't be.
 	hooks.Forget(s.Agent.String(), s.ID)
+	// A dispatch is over the moment a person takes the session over. Left in
+	// place, its record would keep answering for a conversation being typed
+	// into — "needs you" on a session already open in front of you.
+	dispatch.Forget(s.Agent.String(), s.ID)
 	name := tmux.UniqueName(s.TmuxName())
 	cmd := s.Agent.ResumeCmd(s.ID) + hooks.SpawnArgs(s.Agent.String())
 	err := tmux.Spawn(name, s.Cwd, cmd, s.TabTitle(), s.Agent.String(), s.ID)

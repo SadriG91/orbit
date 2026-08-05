@@ -92,6 +92,38 @@ command = ["codex", "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git
 # max_input_chars = 24000
 command = ["copilot", "-p", "-s", "--no-ask-user", "--available-tools", ""]
 
+# Press `d` to hand an agent a task without opening a terminal for it. orbit
+# starts the agent headlessly, reads its own JSONL event stream — so the state
+# in the list is reported rather than inferred — and the run appears as an
+# ordinary session you can take over with Enter at any point.
+#
+# Claude is the only one of the three that can ask for permission in this mode,
+# and it asks orbit rather than you. Orbit's answer is always to stop: it
+# interrupts the turn and marks the session "needs you", so you resume it
+# interactively and approve there, with the whole conversation in front of you.
+# Codex and copilot have no approval channel here at all, so a dispatch to
+# either runs to the end under whatever their own settings permit.
+[dispatch]
+# How long a dispatched run may take before orbit stops it. Copilot in
+# particular has been measured sitting for four minutes on one shell call, so
+# this is what ends a run that has stopped making progress.
+timeout = "30m"
+
+# What claude's permission rules should be for a dispatched run, as
+# --permission-mode: acceptEdits, auto, bypassPermissions, manual, dontAsk or
+# plan. Empty — the default — passes nothing, so a dispatch obeys the same
+# settings your own claude does and stops in exactly the places it would have
+# prompted you. Set "manual" if you would rather be asked about everything an
+# unattended run does; there is no cost to being stopped, since taking a
+# session over resumes it where it left off.
+claude_permission_mode = ""
+
+# Copilot's CLI refuses to run non-interactively without --allow-all-tools, so
+# dispatching one means it may run any tool it likes, unattended, with no
+# prompt. That is a decision rather than a default: until this is true, `d` on
+# a copilot session explains itself instead of dispatching.
+copilot_allow_all_tools = false
+
 [update]
 # Check GitHub for a newer orbit on start — at most once a day, cached in
 # ~/.cache/orbit/update.json — and install it, the same way this copy was

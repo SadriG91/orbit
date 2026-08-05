@@ -14,17 +14,34 @@ import (
 var defaultConfigTOML string
 
 type Config struct {
-	Icons      string  `toml:"icons"`
-	Attach     string  `toml:"attach"`
-	Notify     bool    `toml:"notify"`
-	RecentDays int     `toml:"recent_days"`
-	Sort       string  `toml:"sort"`
-	Group      bool    `toml:"group"`
-	SpawnDelay string  `toml:"spawn_delay"`
-	TabDelay   string  `toml:"tab_delay"`
-	Summary    Summary `toml:"summary"`
-	Update     Update  `toml:"update"`
+	Icons      string   `toml:"icons"`
+	Attach     string   `toml:"attach"`
+	Notify     bool     `toml:"notify"`
+	RecentDays int      `toml:"recent_days"`
+	Sort       string   `toml:"sort"`
+	Group      bool     `toml:"group"`
+	SpawnDelay string   `toml:"spawn_delay"`
+	TabDelay   string   `toml:"tab_delay"`
+	Summary    Summary  `toml:"summary"`
+	Dispatch   Dispatch `toml:"dispatch"`
+	Update     Update   `toml:"update"`
 }
+
+type Dispatch struct {
+	Timeout string `toml:"timeout"`
+	// PermissionMode is passed to claude as --permission-mode. Empty means
+	// don't pass one, which is the default: a dispatch then behaves exactly as
+	// the user's own claude does, and a handoff means "your claude would have
+	// prompted here" rather than a policy orbit invented.
+	PermissionMode string `toml:"claude_permission_mode"`
+	// CopilotAllowAllTools is consent, not a preference. Copilot's CLI
+	// requires --allow-all-tools to run non-interactively at all, so a
+	// dispatched copilot runs whatever it decides to without asking — and
+	// orbit will not do that on a default.
+	CopilotAllowAllTools bool `toml:"copilot_allow_all_tools"`
+}
+
+func (d Dispatch) TimeoutDur() time.Duration { return parseDur(d.Timeout, 30*time.Minute) }
 
 type Update struct {
 	Auto bool `toml:"auto"`
