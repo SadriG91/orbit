@@ -156,6 +156,8 @@ type Model struct {
 	summaryE  time.Duration // rolling estimate, shown as elapsed context only
 	notify    *Notifier
 
+	dumpPath string // where SIGUSR1 writes goroutine stacks; see internal/debug
+
 	version  string // this build, for the update check
 	updating bool   // an update is in flight; keeps the spinner running
 	relaunch string // binary to exec once the program exits — see Relaunch
@@ -1118,3 +1120,7 @@ func (m *Model) Close() {
 	}
 	m.notify.Close()
 }
+
+// SetDumpPath records where a goroutine dump would land, so a wedged dashboard
+// can tell you how to get one out of it. See internal/debug.
+func (m *Model) SetDumpPath(p string) { m.dumpPath = p }
