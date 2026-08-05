@@ -1,6 +1,9 @@
 package ui
 
 import (
+	tea "charm.land/bubbletea/v2"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -288,4 +291,94 @@ func TestDialIsSingleFlighted(t *testing.T) {
 	if m.streamOpening {
 		t.Error("the in-flight flag survived the open result")
 	}
+}
+
+// `o` and `p` are the only settings you can change from the keyboard, and the
+// change used to be thrown away on quit: you found the arrangement you wanted
+// and then had to reproduce it by hand in a file.
+func TestSortAndGroupKeysPersist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".config", "orbit", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("sort = \"age\"\ngroup = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(config.Config{Sort: "age"}, "", "test")
+	runCmd(runKey(m, "o")) // the write happens off the UI goroutine
+	if m.sort.String() == "age" {
+		t.Fatal("`o` did not change the sort at all")
+	}
+	want := m.sort.String()
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Sort != want {
+		t.Errorf("config says sort = %q, want %q", cfg.Sort, want)
+	}
+
+	runCmd(runKey(m, "p"))
+	if cfg, err = config.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Group != m.group {
+		t.Errorf("config says group = %v, want %v", cfg.Group, m.group)
+	}
+}
+
+// A config that cannot be written must not swallow the keypress — the sort
+// still changes on screen, and the failure is said rather than hidden.
+func TestSortStillWorksWhenTheConfigCannotBeWritten(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no config file at all
+
+	m := New(config.Config{Sort: "age"}, "", "test")
+	before := m.sort
+	cmd := runKey(m, "o")
+	if m.sort == before {
+		t.Fatal("the sort did not change when saving was impossible")
+	}
+	if cmd == nil {
+		t.Fatal("no save was attempted")
+	}
+	msg := runCmd(cmd)
+	sm, ok := msg.(statusMsg)
+	if !ok {
+		t.Fatalf("a failed save produced %T, want a statusMsg", msg)
+	}
+	if !strings.Contains(string(sm), "could not save") {
+		t.Errorf("status = %q, want it to mention the failure", sm)
+	}
+}
+
+// runKey feeds one keypress through Update and hands back the command it
+// produced, so a test can run the side effect deliberately.
+func runKey(m *Model, key string) tea.Cmd {
+	_, cmd := m.Update(tea.KeyPressMsg{Code: rune(key[0]), Text: key})
+	return cmd
+}
+
+// runCmd executes a command the way the runtime would, unwrapping a batch
+// rather than stopping at the BatchMsg it hands back. Returns the last
+// non-batch message, which is enough for these tests.
+func runCmd(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return msg
+	}
+	var last tea.Msg
+	for _, sub := range batch {
+		if got := runCmd(sub); got != nil {
+			last = got
+		}
+	}
+	return last
 }
