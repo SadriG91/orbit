@@ -94,12 +94,19 @@ func Load(s *session.Session) (Record, bool) {
 	return rec, true
 }
 
+// save writes the summary owner-only. This is the one thing orbit stores that
+// is really content — a few sentences about what someone was doing and how it
+// went — so it should not be readable by every account on the machine.
+//
+// The agents' own transcript stores are world-readable, so this is defence
+// that does not defend very much on its own. It is still orbit's data, and the
+// only part of the problem orbit gets a say in.
 func save(s *session.Session, rec Record) {
-	if err := os.MkdirAll(Dir(), 0o755); err != nil {
+	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		return
 	}
 	if b, err := json.MarshalIndent(rec, "", "  "); err == nil {
-		os.WriteFile(File(s), b, 0o644)
+		os.WriteFile(File(s), b, 0o600)
 	}
 }
 
