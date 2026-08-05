@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/term"
 	"github.com/sadrig91/orbit/internal/tmux"
@@ -74,9 +75,16 @@ func attachCommand(name string) *exec.Cmd {
 
 // resumeSession and newSession compose an agent with tmux. They live here
 // rather than in package tmux, which deliberately knows nothing about agents.
+//
+// Both append the hook injection here rather than inside ResumeCmd/NewCmd,
+// because those also feed the detail pane — "⏎ resumes with claude --resume
+// <id>" should stay something a person would type, not carry orbit's
+// plumbing. Every live session passes through one of these two functions,
+// which is what makes the hooks' coverage total.
 func resumeSession(s *session.Session) (string, error) {
 	name := tmux.UniqueName(s.TmuxName())
-	err := tmux.Spawn(name, s.Cwd, s.Agent.ResumeCmd(s.ID), s.TabTitle(), s.Agent.String(), s.ID)
+	cmd := s.Agent.ResumeCmd(s.ID) + hooks.SpawnArgs(s.Agent.String())
+	err := tmux.Spawn(name, s.Cwd, cmd, s.TabTitle(), s.Agent.String(), s.ID)
 	return name, err
 }
 
@@ -86,6 +94,7 @@ func newSession(ag session.Agent, cwd string) (string, error) {
 	stub := &session.Session{Agent: ag, Cwd: cwd, Title: "new " + ag.String()}
 	base := ag.Tag() + "-" + strings.NewReplacer("/", "-", ".", "_", " ", "_").Replace(stub.ShortCwd())
 	name := tmux.UniqueName(base)
-	err := tmux.Spawn(name, cwd, ag.NewCmd(), stub.TabTitle(), ag.String(), "")
+	cmd := ag.NewCmd() + hooks.SpawnArgs(ag.String())
+	err := tmux.Spawn(name, cwd, cmd, stub.TabTitle(), ag.String(), "")
 	return name, err
 }

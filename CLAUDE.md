@@ -49,6 +49,7 @@ Dependencies run strictly one way:
 
 ```
 format, config      no local imports
+hooks               agent hook events → state files; imports format only
 tmux                names and strings only — knows nothing about agents
 session             the domain model (parsers, index, state, sorting)
 search, summary     read transcripts; depend on session
