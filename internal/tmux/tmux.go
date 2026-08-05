@@ -311,6 +311,82 @@ func Available() bool {
 	return err == nil
 }
 
+// MinVersion is the oldest tmux orbit is known to work on, measured rather
+// than assumed. 3.4 is also what Ubuntu 24.04 LTS ships, which is the reason
+// to care: a floor above it means orbit cannot be installed on a current LTS
+// without building tmux from source first.
+//
+// Every capability orbit uses was checked against 3.4, 3.6b and 3.7b and
+// behaves identically on all three: control-mode attach over a pty, the
+// %begin/%end/%error framing, %output and its octal escaping, switch-client,
+// send-keys, `refresh-client -f no-output` genuinely suppressing output rather
+// than merely accepting the flag, and #{client_control_mode} reporting 1 so a
+// preview client can be told apart from a real one. The full test suite passes
+// on 3.4 as well.
+//
+// Worth recording what this floor is not. tmux 3.7 carries "Fix control client
+// hang on exit after toggling no-output (issue 5049)", which reads exactly
+// like the sequence the live preview performs — but it does not reproduce: on
+// 3.6b a control client told to detach after that toggle exits in about a
+// millisecond. Do not raise this constant on the strength of a changelog entry
+// without a failing test to go with it.
+const MinVersion = "3.4"
+
+const minMajor, minMinor = 3, 4
+
+// Version returns what `tmux -V` reports without its "tmux " prefix, e.g.
+// "3.7b". Empty if tmux cannot be run at all.
+func Version() string {
+	// Deliberately not through Args: -V takes no server and no config, and
+	// asking for a socket here would start one just to read a version.
+	out, err := exec.Command("tmux", "-V").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(string(out)), "tmux ")
+}
+
+// CheckVersion reports whether the installed tmux is new enough, with a
+// message that says what to do about it rather than only what is wrong.
+func CheckVersion() error {
+	v := Version()
+	if atLeast(v, minMajor, minMinor) {
+		return nil
+	}
+	return fmt.Errorf("tmux %s or newer required, found %s — brew upgrade tmux, "+
+		"or build from https://github.com/tmux/tmux/releases", MinVersion, v)
+}
+
+// atLeast compares a tmux version against major.minor. Release suffixes are
+// ignored: 3.7b is 3.7 for this purpose, since the letter releases are bug
+// fixes on the same feature set.
+//
+// Anything unparseable counts as new enough. tmux built from git reports
+// "next-3.8" or a bare "master", and those are ahead of any release we could
+// name — refusing to start on them would punish exactly the people most likely
+// to have the fixes.
+func atLeast(v string, major, minor int) bool {
+	v = strings.TrimPrefix(v, "next-")
+	head, rest, ok := strings.Cut(v, ".")
+	gotMajor, err := strconv.Atoi(head)
+	if !ok || err != nil {
+		return true
+	}
+	// Trim the letter suffix: "7b" -> 7.
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	gotMinor, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return true
+	}
+	if gotMajor != major {
+		return gotMajor > major
+	}
+	return gotMinor >= minor
+}
+
 // KillServerForTest tears down the orbit tmux server. Only integration tests
 // should need this; normal teardown is per-session via Kill.
 func KillServerForTest() error { return run("kill-server") }

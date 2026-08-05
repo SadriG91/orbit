@@ -111,6 +111,53 @@ func TestAttachArgvMatchesArgs(t *testing.T) {
 	}
 }
 
+func TestAtLeast(t *testing.T) {
+	tests := []struct {
+		v    string
+		want bool
+	}{
+		// The floor itself, and its bug-fix releases.
+		{"3.4", true},
+		{"3.4a", true},
+		// Everything verified above it.
+		{"3.5a", true},
+		{"3.6b", true},
+		{"3.7b", true},
+		// Below the floor: untested, so unsupported.
+		{"3.3a", false},
+		{"3.3", false},
+		{"2.9", false},
+		// Later releases, including a major bump. 3.10 must not compare as
+		// older than 3.4 the way a string comparison would have it.
+		{"3.8", true},
+		{"3.10", true},
+		{"4.0", true},
+		// Builds from git are ahead of any release we could name, so they must
+		// not be locked out by a version string we can't read.
+		{"next-3.8", true},
+		{"master", true},
+		{"", true},
+		{"nonsense", true},
+	}
+	for _, tt := range tests {
+		if got := atLeast(tt.v, minMajor, minMinor); got != tt.want {
+			t.Errorf("atLeast(%q, %d, %d) = %v, want %v", tt.v, minMajor, minMinor, got, tt.want)
+		}
+	}
+}
+
+// The installed tmux has to satisfy the floor, or every other test in this
+// repo that touches a real server is measuring something orbit won't run on.
+func TestInstalledTmuxMeetsTheFloor(t *testing.T) {
+	if !Available() {
+		t.Skip("tmux not installed")
+	}
+	if err := CheckVersion(); err != nil {
+		t.Fatalf("%v", err)
+	}
+	t.Logf("tmux %s", Version())
+}
+
 // orbit's live preview attaches a control client to whatever is selected. If
 // that counted as "attached", Enter would try to focus a terminal tab that was
 // never opened, and every session you merely looked at would be marked as open.

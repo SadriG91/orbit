@@ -104,6 +104,9 @@ func requireTmux() error {
 	if !tmux.Available() {
 		return fmt.Errorf("tmux not found — brew install tmux")
 	}
+	if err := tmux.CheckVersion(); err != nil {
+		return err
+	}
 	return tmux.InstallConf()
 }
 
