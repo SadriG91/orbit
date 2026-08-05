@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/sadrig91/orbit/internal/config"
+	"github.com/sadrig91/orbit/internal/debug"
 	"github.com/sadrig91/orbit/internal/term"
 	"github.com/sadrig91/orbit/internal/tmux"
 	"github.com/sadrig91/orbit/internal/ui"
@@ -50,6 +51,11 @@ func main() {
 		die(err)
 	}
 
+	// Armed before anything can wedge. A dashboard that stops responding is
+	// otherwise undiagnosable: SIGQUIT would put the traceback in the alt
+	// screen and kill the process with it.
+	dumpPath := debug.ListenForDumps()
+
 	// Before loading: settings added since the file was written are appended
 	// to it, so a new feature is visible where people look for it. Values
 	// already there are never touched, and a failure here is not worth
@@ -85,6 +91,7 @@ func main() {
 			"were removed from your config: " + strings.Join(retiredKeys, ", "))
 	}
 	m.Warn(term.Preflight())
+	m.SetDumpPath(dumpPath)
 
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		die(err)
