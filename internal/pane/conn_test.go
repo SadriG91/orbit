@@ -1,6 +1,7 @@
 package pane
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -161,5 +162,45 @@ func TestFramingRoutesNotificationsAroundBlocks(t *testing.T) {
 	}
 	if output.Pane != "%0" || string(output.Data) != "tick 2\r\r\n" {
 		t.Errorf("output = pane %q data %q", output.Pane, output.Data)
+	}
+}
+
+// A command that never reached tmux must not leave a waiter behind.
+//
+// The queue is matched by position, because tmux assigns the serials rather
+// than us. So an entry waiting for a reply that can never come does not just
+// leak — it shifts every later reply by one, and the next command gets an
+// answer belonging to somebody else. The timeout path deliberately does the
+// opposite and keeps its entry, because there the command *was* sent.
+func TestFailedWriteLeavesNoWaiterBehind(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	w.Close() // any write now fails
+
+	c := &Conn{ptmx: w, notes: make(chan Notification, 1), done: make(chan struct{})}
+
+	if _, err := c.Command("list-sessions"); err == nil {
+		t.Fatal("a write to a closed pty reported success")
+	}
+	if n := len(c.pending); n != 0 {
+		t.Fatalf("%d waiter(s) left after a failed write, want 0 — the next reply would go to the wrong caller", n)
+	}
+
+	// And the queue still works afterwards rather than being permanently
+	// skewed: the next command's reply must reach the next command.
+	c.ptmx = nil // unused; Command is not reached again
+	ch := make(chan reply, 1)
+	c.pending = append(c.pending, ch)
+	c.deliver(reply{lines: []string{"the right answer"}})
+	select {
+	case got := <-ch:
+		if len(got.lines) != 1 || got.lines[0] != "the right answer" {
+			t.Errorf("reply = %q, want it delivered to the caller that asked", got.lines)
+		}
+	default:
+		t.Error("the reply reached nobody")
 	}
 }
