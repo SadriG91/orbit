@@ -182,7 +182,9 @@ func TestSyncLeavesACurrentFileAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := Path()
-	if err := os.WriteFile(path, []byte(defaultConfigTOML), 0o600); err != nil {
+	// UserTemplate rather than the raw default: that is what orbit writes, and
+	// a file still holding the managed values is by definition out of date.
+	if err := os.WriteFile(path, []byte(UserTemplate()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Stat(path)
@@ -190,7 +192,7 @@ func TestSyncLeavesACurrentFileAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	added, err := Sync()
+	added, _, err := Sync()
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -222,7 +224,7 @@ func TestSyncWritesAndKeepsMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	added, err := Sync()
+	added, _, err := Sync()
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -262,7 +264,7 @@ func TestSyncWritesAndKeepsMode(t *testing.T) {
 	}
 
 	// Running again is a no-op: everything is now present.
-	again, err := Sync()
+	again, _, err := Sync()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +285,7 @@ func TestSyncRefusesToTouchABrokenFile(t *testing.T) {
 	if err := os.WriteFile(Path(), []byte(broken), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Sync(); err == nil {
+	if _, _, err := Sync(); err == nil {
 		t.Error("Sync reported success on an unparseable file")
 	}
 	data, _ := os.ReadFile(Path())
@@ -297,7 +299,7 @@ func TestSyncRefusesToTouchABrokenFile(t *testing.T) {
 func TestSyncIgnoresAMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	added, err := Sync()
+	added, _, err := Sync()
 	if err != nil || len(added) != 0 {
 		t.Errorf("Sync on a missing file: %v, %v", added, err)
 	}

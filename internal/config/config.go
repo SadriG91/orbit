@@ -106,8 +106,10 @@ func Load() (Config, error) {
 	path := Path()
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		// UserTemplate, not the embedded default: settings orbit owns are
+		// withheld so they keep tracking releases. See managed.go.
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
-			os.WriteFile(path, []byte(defaultConfigTOML), 0o644)
+			os.WriteFile(path, []byte(UserTemplate()), 0o644)
 		}
 		return cfg, nil
 	}

@@ -158,17 +158,29 @@ existing subscription and orbit needs no API keys. The command is configurable
 per provider — point it at the cheapest model each one offers, since this is a
 summarising job rather than a reasoning one:
 
+orbit owns these commands and updates them with each release, so they are not
+written into your config. They depend on things that move underneath us: which
+flag stops a CLI recording a session of its own, which models a provider will
+accept, which subcommand the installed version has. A copy frozen into your
+file on install day goes wrong quietly — a default that turned out to be
+rejected by every ChatGPT-account login stayed that way, unfixable, because
+orbit couldn't tell it from a value you'd chosen.
+
+Write one yourself to take it over, and orbit leaves it alone for good:
+
 ```toml
-[summary.claude]
-command = ["claude", "-p", "--no-session-persistence", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
+[summary.codex]
+command = ["codex", "exec", "--ephemeral", "--model", "something-cheaper"]
 ```
 
-Keep the don't-persist flag if you change the command. These CLIs record a run
-as a real session, so without `--no-session-persistence` (claude) or
-`--ephemeral` (codex) every summary leaves a conversation of orbit's own on
-disk — resumable, counted in the token sort, and summarisable in turn. Copilot
-has no equivalent flag, so orbit runs all three in `~/.cache/orbit/scratch` and
-hides sessions found there.
+Keep the flag that stops the CLI recording a session if you do —
+`--no-session-persistence` for claude, `--ephemeral` for codex — or every
+summary leaves a conversation of orbit's own on disk, resumable and counted in
+the token sort. Copilot has no equivalent, so orbit runs all three in
+`~/.cache/orbit/scratch` and hides sessions found there.
+
+A command orbit itself wrote into an older config is retired on the next start,
+with a note saying so. One you wrote is never touched.
 
 Generation takes around ten seconds and runs in the background. The bar in the
 header is global and measures *coverage* — how many of the sessions on screen

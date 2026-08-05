@@ -12,32 +12,44 @@ import (
 // into that file, so a new feature is something you can see and tune rather
 // than something you have to already know about.
 //
-// It only ever adds. A key already in the file is left exactly as it is, even
-// where orbit's own default has since changed: at that point the file is a
-// decision someone made, and there is no way to tell a deliberate choice from
-// a value that merely came with an older release. So new settings appear;
-// existing ones are never rewritten, reordered or reformatted.
+// A value in the file is never rewritten, reordered or reformatted. Where
+// orbit's own default has since changed the file still wins, because a value
+// someone put there is a decision and this cannot see the difference between a
+// deliberate one and a leftover.
 //
-// Returns the names of what it added, for the caller to mention.
-func Sync() ([]string, error) {
+// The single exception is a managed key holding a value orbit itself shipped —
+// see managed.go. That is not someone's decision, it is orbit's own, and it is
+// retired so the setting goes back to tracking releases. Both conditions are
+// required, so a value orbit does not recognise is left alone whatever it is.
+//
+// Returns the names of what it added and what it retired, for the caller to
+// mention.
+func Sync() (added, removed []string, err error) {
 	path := Path()
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return nil, nil // Load writes the annotated default; nothing to merge
+		return nil, nil, nil // Load writes the template; nothing to merge
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// A file orbit can't parse is a file orbit must not rewrite — the
 	// merge would be built on a misreading, and hand-edits would go with it.
 	var probe map[string]any
 	if _, err := toml.Decode(string(data), &probe); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	var have Config
+	if _, err := toml.Decode(string(data), &have); err != nil {
+		return nil, nil, err
 	}
 
-	merged, added := mergeConfig(string(data), defaultConfigTOML)
-	if len(added) == 0 {
-		return nil, nil // untouched, so the file keeps its mtime
+	// Merged against the template rather than the raw default, so managed
+	// settings are never added back after being retired.
+	merged, added := mergeConfig(string(data), UserTemplate())
+	merged, removed = retire(merged, have)
+	if len(added) == 0 && len(removed) == 0 {
+		return nil, nil, nil // untouched, so the file keeps its mtime
 	}
 
 	mode := os.FileMode(0o644)
@@ -48,23 +60,23 @@ func Sync() ([]string, error) {
 	// by an interrupted start is one orbit would refuse to parse next time.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.toml")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.WriteString(merged); err != nil {
 		tmp.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.Chmod(tmp.Name(), mode); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return added, nil
+	return added, removed, nil
 }
 
 // A region is a table and the lines that belong to it: the top-level one,
