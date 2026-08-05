@@ -14,10 +14,15 @@ import (
 // almost nothing in it.
 func uuid4() string {
 	var b [16]byte
-	// crypto/rand.Read is documented never to return an error since Go 1.24;
-	// it panics internally if the system source fails, which is the right
-	// outcome here anyway — a predictable session id is worse than a crash.
-	rand.Read(b[:])
+	// The return values are deliberately not checked, and this is the contract
+	// rather than an oversight. crypto/rand.Read "never returns an error, and
+	// always fills b entirely" — it calls io.ReadFull on Reader and crashes the
+	// program irrecoverably if that fails. Both failure modes a check would
+	// guard against, an error and a short read, are excluded by the API, so the
+	// check would be unreachable code standing between a reader and the reason
+	// it is unreachable. Crashing is also the outcome we would want: a
+	// predictable session id is worse than no session id.
+	rand.Read(b[:])             //nolint:errcheck // documented never to fail; see above
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
 	var out [36]byte
