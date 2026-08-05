@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/session"
@@ -102,7 +103,12 @@ func assertFrame(t *testing.T, m *Model, frame string) {
 	t.Helper()
 	lines := strings.Split(frame, "\n")
 	for i, line := range lines {
-		if n := len([]rune(stripANSI(line))); n > m.w {
+		// Display width, not a rune count. A logo cell is a placeholder rune
+		// plus the row/column diacritics that tell the terminal which part of
+		// the image to draw — six runes for the two columns it actually
+		// occupies. Counting runes measures the encoding rather than the
+		// screen, and reports every row with a logo in it as overflowing.
+		if n := lipgloss.Width(stripANSI(line)); n > m.w {
 			t.Errorf("line %d is %d cols, wider than %d: %q", i, n, m.w, stripANSI(line))
 		}
 	}

@@ -59,8 +59,11 @@ const (
 	IconLogo                 // the real brand marks, via Kitty graphics
 )
 
-// ResolveIconMode defaults to text: logos need a terminal that composites Kitty
-// graphics, and a wrong guess renders mojibake rather than degrading quietly.
+// ResolveIconMode turns the configured string into a mode. Everything except
+// an explicit "logo"/"auto" on a terminal that composites Kitty graphics ends
+// up as text: a wrong guess renders mojibake rather than degrading quietly,
+// so the capability is detected rather than assumed — which is what makes
+// "auto" safe to ship as the default.
 func ResolveIconMode(mode string) IconMode {
 	if (mode == "logo" || mode == "auto") && LogosSupported() {
 		return IconLogo

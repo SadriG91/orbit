@@ -2,11 +2,11 @@ package ui
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/session"
 )
@@ -79,14 +79,53 @@ func TestTransmitLogosChunking(t *testing.T) {
 	}
 }
 
-func TestIconModeDefaultsToText(t *testing.T) {
-	t.Setenv("ORBIT_ICONS", "")
-	if ResolveIconMode(os.Getenv("ORBIT_ICONS")) != IconText {
-		t.Error("icons should default to text: logos need a Kitty-graphics terminal")
+// The shipped default is auto, which only holds up because the capability is
+// detected rather than assumed: a terminal that can't composite Kitty
+// graphics must get the text tags, not mojibake where the marks would be.
+func TestIconModeDefaultIsAutoAndDegrades(t *testing.T) {
+	cfg, err := config.LoadDefaults()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Setenv("ORBIT_ICONS", "logo")
+	if cfg.Icons != "auto" {
+		t.Errorf("shipped default is icons = %q, want auto", cfg.Icons)
+	}
+
+	clear := func() {
+		t.Setenv("TMUX", "")
+		t.Setenv("KITTY_WINDOW_ID", "")
+		t.Setenv("TERM", "xterm-256color")
+		t.Setenv("TERM_PROGRAM", "")
+		t.Setenv("GHOSTTY_RESOURCES_DIR", "")
+	}
+
+	clear()
+	t.Setenv("TERM_PROGRAM", "ghostty")
+	if got := ResolveIconMode(cfg.Icons); got != IconLogo {
+		t.Errorf("auto in Ghostty resolved to %v, want the logos", got)
+	}
+	clear()
+	t.Setenv("KITTY_WINDOW_ID", "1")
+	if got := ResolveIconMode(cfg.Icons); got != IconLogo {
+		t.Errorf("auto in Kitty resolved to %v, want the logos", got)
+	}
+
+	// Everywhere else, the default must come out as text.
+	clear()
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	if got := ResolveIconMode(cfg.Icons); got != IconText {
+		t.Errorf("auto in a plain terminal resolved to %v, want text", got)
+	}
+	clear()
+	t.Setenv("TERM_PROGRAM", "ghostty")
 	t.Setenv("TMUX", "/tmp/fake,1,0")
-	if ResolveIconMode(os.Getenv("ORBIT_ICONS")) != IconText {
+	if ResolveIconMode(cfg.Icons) != IconText {
 		t.Error("logos must stay off inside tmux — placeholders aren't passed through")
+	}
+	// And an explicit choice still wins over the detection either way.
+	clear()
+	t.Setenv("TERM_PROGRAM", "ghostty")
+	if ResolveIconMode("text") != IconText {
+		t.Error("icons = text was overridden by the terminal's capability")
 	}
 }

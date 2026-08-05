@@ -292,10 +292,12 @@ so a single run can be changed without editing it.
 
 ### Agent logos
 
-Sessions are tagged `cl` / `cx` / `cp` by default, which works in any terminal.
-Set `ORBIT_ICONS=logo` and orbit renders the actual Claude, OpenAI and Copilot
-marks instead, as images, via the Kitty graphics protocol — supported by Ghostty
-and Kitty. Check yours first:
+Sessions are tagged with the actual Claude, OpenAI and Copilot marks, drawn as
+images via the Kitty graphics protocol — supported by Ghostty and Kitty. Any
+other terminal gets the `cl` / `cx` / `cp` text tags instead: the default is
+`icons = "auto"`, which detects the capability rather than assuming it. Set
+`icons = "text"` (or `ORBIT_ICONS=text`) to pin it to the tags. Check what
+yours does:
 
 ```sh
 orbit --probe-logos

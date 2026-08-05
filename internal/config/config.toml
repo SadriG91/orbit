@@ -2,8 +2,10 @@
 # Environment variables (ORBIT_ICONS, ORBIT_SPAWN_DELAY, ...) still win over
 # this file, so you can override a setting for one run without editing it.
 
-# text | logo | auto   — logo needs a terminal that speaks Kitty graphics
-icons = "text"
+# text | logo | auto   — the real agent marks need a terminal that speaks
+# Kitty graphics (Ghostty, Kitty). auto uses them there and the cl/cx/cp text
+# tags everywhere else; text pins it to the tags.
+icons = "auto"
 
 # smart | tab | window | inline   — what Enter does
 attach = "smart"
