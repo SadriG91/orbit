@@ -101,6 +101,11 @@ escapes the `\x1f` field separator as a literal `\037` (the parser accepts
 either), and every invocation must pass `-u` or tmux mangles multi-byte
 characters in titles, causing an endless retitle loop.
 
+`MinVersion` sets the supported floor at tmux 3.4 — what Ubuntu 24.04 LTS
+ships — and `requireTmux` enforces it on start. The floor is measured, not
+assumed: read the comment on `MinVersion` before raising it, and don't raise it
+on the strength of a changelog entry without a failing test to go with it.
+
 **Agents are launched by typing into an interactive login shell**, not via
 `new-session <cmd>` — agents are frequently shell functions or version-manager
 shims that don't exist in a bare `sh -c`. Hence `spawn_delay`.

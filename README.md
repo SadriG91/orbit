@@ -54,9 +54,10 @@ go install github.com/sadrig91/orbit/cmd/orbit@latest
 Or download a binary for your platform from
 [Releases](https://github.com/SadriG91/orbit/releases).
 
-tmux is required either way. [Ghostty](https://ghostty.org) (1.3+ for the
-best experience) or iTerm2 is optional but gets you tab spawning and desktop
-notifications.
+tmux 3.4 or newer is required either way — that's what Ubuntu 24.04 LTS ships,
+and orbit checks on start rather than misbehaving later.
+[Ghostty](https://ghostty.org) (1.3+ for the best experience) or iTerm2 is
+optional but gets you tab spawning and desktop notifications.
 
 ### Staying current
 
