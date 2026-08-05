@@ -267,6 +267,9 @@ func launchLine(cmd string) string {
 // stub — and those don't exist in the bare `sh -c` new-session would use. It
 // also leaves you at a usable prompt if the agent exits.
 func Spawn(name, cwd, cmd, title, agent, sessionID string) error {
+	if err := ValidateTarget(name); err != nil {
+		return err
+	}
 	if err := run("new-session", "-d", "-s", name, "-c", cwd, "-x", "220", "-y", "60"); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
@@ -285,6 +288,7 @@ func Spawn(name, cwd, cmd, title, agent, sessionID string) error {
 }
 
 func UniqueName(base string) string {
+	base = safeSessionName(base)
 	taken := map[string]bool{}
 	for _, t := range List() {
 		taken[t.Name] = true
@@ -298,6 +302,56 @@ func UniqueName(base string) string {
 			return n
 		}
 	}
+}
+
+// safeSessionName keeps every generated name safe to embed in a tmux
+// control-mode command. Control mode accepts the same command language as a
+// config file, so whitespace, quotes, backslashes and separators such as ';'
+// cannot be allowed to cross that boundary as part of a target.
+func safeSessionName(name string) string {
+	if name == "" {
+		return "orbit"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if safeTargetRune(r) {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// ValidateTarget applies the same allowlist used for generated names to any
+// target that will be interpolated into a command sent over control mode. It
+// also accepts tmux's numeric pane, window and session IDs (%1, @2 and $3).
+func ValidateTarget(target string) error {
+	if target == "" {
+		return fmt.Errorf("empty tmux target")
+	}
+	if target[0] == '%' || target[0] == '@' || target[0] == '$' {
+		if len(target) == 1 {
+			return fmt.Errorf("unsafe tmux target %q", target)
+		}
+		for _, r := range target[1:] {
+			if r < '0' || r > '9' {
+				return fmt.Errorf("unsafe tmux target %q", target)
+			}
+		}
+		return nil
+	}
+	for _, r := range target {
+		if !safeTargetRune(r) {
+			return fmt.Errorf("unsafe tmux target %q", target)
+		}
+	}
+	return nil
+}
+
+func safeTargetRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+		r >= '0' && r <= '9' || r == '-' || r == '_'
 }
 
 func Kill(name string) error { return run("kill-session", "-t", name) }

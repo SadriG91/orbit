@@ -186,6 +186,10 @@ func (p *Pane) SendWheelTo(session string, x, y int, direction WheelDirection) e
 }
 
 func (p *Pane) scrollHistory(session string, direction WheelDirection) error {
+	target, err := commandTarget(session)
+	if err != nil {
+		return err
+	}
 	p.mu.Lock()
 	if p.session != session {
 		p.mu.Unlock()
@@ -196,7 +200,7 @@ func (p *Pane) scrollHistory(session string, direction WheelDirection) error {
 
 	var snapshot []string
 	if needSnapshot {
-		out, err := p.conn.Command(fmt.Sprintf("capture-pane -p -e -S -5000 -t %s", session))
+		out, err := p.conn.Command(fmt.Sprintf("capture-pane -p -e -S -5000 -t %s", target))
 		if err != nil {
 			return err
 		}
@@ -328,8 +332,12 @@ func (p *Pane) reply(emu *vt.Emulator, session string) {
 // own parser treats a bare # as a comment, so an unquoted #{…} silently
 // becomes no argument at all.
 func (p *Pane) windowSize(session string) (int, int) {
+	target, err := commandTarget(session)
+	if err != nil {
+		return defaultCols, defaultRows
+	}
 	out, err := p.conn.Command(fmt.Sprintf(
-		"display-message -p -t %s '#{window_width} #{window_height}'", session))
+		"display-message -p -t %s '#{window_width} #{window_height}'", target))
 	if err != nil || len(out) == 0 {
 		return defaultCols, defaultRows
 	}
@@ -348,7 +356,11 @@ func (p *Pane) windowSize(session string) (int, int) {
 // capture reads the pane's current screen, escape sequences included, as the
 // emulator's starting state. -e keeps the colours, -J unwraps folded lines.
 func (p *Pane) capture(session string) string {
-	out, err := p.conn.Command(fmt.Sprintf("capture-pane -p -e -J -t %s", session))
+	target, err := commandTarget(session)
+	if err != nil {
+		return ""
+	}
+	out, err := p.conn.Command(fmt.Sprintf("capture-pane -p -e -J -t %s", target))
 	if err != nil {
 		return ""
 	}

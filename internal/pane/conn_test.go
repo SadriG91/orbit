@@ -70,6 +70,19 @@ func newTestConn() *Conn {
 	}
 }
 
+func TestCommandTargetRejectsTmuxSyntax(t *testing.T) {
+	for _, target := range []string{"cl-work-orbit", "cx_project_2", "A1", "%0", "@12", "$3"} {
+		if got, err := commandTarget(target); err != nil || got != target {
+			t.Errorf("commandTarget(%q) = %q, %v", target, got, err)
+		}
+	}
+	for _, target := range []string{"", "%", "%x", "%0; kill-server", "name; kill-server", "name\nkill-server", "two words", `a'b`, `a\\b`, "#comment"} {
+		if got, err := commandTarget(target); err == nil || got != "" {
+			t.Errorf("commandTarget(%q) = %q, %v; want rejection", target, got, err)
+		}
+	}
+}
+
 // A verbatim capture from tmux 3.7b, CRs included: the attach handshake, two
 // successful commands, a %output between them, and a parse error.
 const transcript = "\x1bP1000p%begin 1785920907 291 0\r\n" +

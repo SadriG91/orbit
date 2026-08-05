@@ -107,6 +107,22 @@ func TestLaunchLineClearsEchoBeforeStartingAgent(t *testing.T) {
 	}
 }
 
+func TestSafeSessionNameRemovesControlCommandSyntax(t *testing.T) {
+	tests := map[string]string{
+		"":                       "orbit",
+		"cx-work-orbit":          "cx-work-orbit",
+		"cx-work; kill-server":   "cx-work__kill-server",
+		"cl-line\nbreak":         "cl-line_break",
+		`cp-quote'and\backslash`: "cp-quote_and_backslash",
+		"cx-unicode-项目":          "cx-unicode-__",
+	}
+	for in, want := range tests {
+		if got := safeSessionName(in); got != want {
+			t.Errorf("safeSessionName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // AttachArgv is what terminals run to show a session; it must carry the same
 // socket and config flags as every other invocation, or the tab would attach
 // to the wrong server.
