@@ -110,3 +110,38 @@ func TestAttachArgvMatchesArgs(t *testing.T) {
 		}
 	}
 }
+
+// orbit's live preview attaches a control client to whatever is selected. If
+// that counted as "attached", Enter would try to focus a terminal tab that was
+// never opened, and every session you merely looked at would be marked as open.
+func TestParseClientsIgnoresControlClients(t *testing.T) {
+	lines := []string{
+		strings.Join([]string{"cl-work-api", "0"}, fieldSep), // a real terminal
+		strings.Join([]string{"cx-widgets", "1"}, fieldSep),  // orbit's preview
+		strings.Join([]string{"cp-docs", "1"}, fieldSep),     // ditto
+		strings.Join([]string{"cp-docs", "0"}, fieldSep),     // …and a real one too
+	}
+	got := parseClients(strings.Join(lines, "\n"))
+
+	if !got["cl-work-api"] {
+		t.Error("a real client did not register as attached")
+	}
+	if got["cx-widgets"] {
+		t.Error("a control client counted as attached — this is the bug")
+	}
+	// Both kinds on one session still counts: the terminal really is open.
+	if !got["cp-docs"] {
+		t.Error("a session with both a control and a real client should count")
+	}
+}
+
+func TestParseClientsHandlesNoClients(t *testing.T) {
+	if got := parseClients(""); len(got) != 0 {
+		t.Errorf("empty output = %v, want no entries", got)
+	}
+	// tmux 3.4 escapes the separator here as well.
+	got := parseClients("cl-work-api" + fieldSepEscaped + "0")
+	if !got["cl-work-api"] {
+		t.Error("the escaped separator form was not understood")
+	}
+}
