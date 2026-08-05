@@ -13,6 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/pane"
 	"github.com/sadrig91/orbit/internal/search"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/summary"
@@ -73,8 +74,15 @@ type (
 		sessions []*session.Session
 	}
 	previewMsg struct{ name, text string }
-	statusMsg  string
-	searchMsg  struct {
+	// The streaming preview: a connection opened (or failed to open), and a
+	// wakeup saying the emulator's screen changed.
+	paneOpenMsg struct {
+		p   *pane.Pane
+		err string
+	}
+	paneDirtyMsg struct{}
+	statusMsg    string
+	searchMsg    struct {
 		query   string
 		matches map[string]search.Match
 	}
@@ -113,6 +121,15 @@ type Model struct {
 
 	preview     string
 	previewName string
+
+	// stream is the live preview's control client, or nil when there isn't
+	// one. streamOff latches after a failure so a tmux that won't do control
+	// mode costs one attempt rather than one per cursor movement, and
+	// streamOpening single-flights the dial — capture runs on every tick, and
+	// a handshake that outlasts one would otherwise start a second client.
+	stream        *pane.Pane
+	streamOff     bool
+	streamOpening bool
 
 	status      string
 	statusUntil time.Time
@@ -336,13 +353,72 @@ func scan(gen int, ix *session.Index) tea.Msg {
 	return scanMsg{gen: gen, sessions: sessions}
 }
 
+// capture refreshes the preview for whatever is selected.
+//
+// The live stream is preferred and capture-pane is the fallback, not the other
+// way round: a poll forks a process, arrives up to a tick late, and loses
+// anything that appeared and scrolled away in between. The fallback still
+// matters — control mode needs a pty and a tmux that cooperates, and neither
+// is worth making the dashboard conditional on.
 func (m *Model) capture() tea.Cmd {
 	s := m.sel()
 	if s == nil || s.Tmux == nil {
 		return func() tea.Msg { return previewMsg{} }
 	}
 	name := s.Tmux.Name
+
+	switch {
+	case m.stream != nil:
+		return m.followCmd(name)
+	case m.streamOpening:
+		// A dial is already in flight. Keep polling so the pane stays live
+		// until it lands, but do not start a second client.
+		return func() tea.Msg { return previewMsg{name, tmux.Capture(name, 60)} }
+	case !m.streamOff:
+		m.streamOpening = true
+		return m.openStreamCmd(name)
+	}
 	return func() tea.Msg { return previewMsg{name, tmux.Capture(name, 60)} }
+}
+
+// openStreamCmd dials the control client. It runs off the UI goroutine because
+// it spawns a process and waits for a handshake.
+func (m *Model) openStreamCmd(name string) tea.Cmd {
+	// Show something immediately rather than a blank pane while dialling.
+	poll := func() tea.Msg { return previewMsg{name, tmux.Capture(name, 60)} }
+	return tea.Batch(poll, func() tea.Msg {
+		p, err := pane.Open(name)
+		if err != nil {
+			return paneOpenMsg{err: err.Error()}
+		}
+		return paneOpenMsg{p: p}
+	})
+}
+
+// followCmd moves the existing client onto the selected session. Switching
+// costs a command rather than a process, which is the reason one connection
+// serves the whole dashboard.
+func (m *Model) followCmd(name string) tea.Cmd {
+	p := m.stream
+	if p.Session() == name {
+		return nil // already watching it; the stream will say when it changes
+	}
+	return func() tea.Msg {
+		if err := p.Switch(name); err != nil {
+			return statusMsg("preview: " + err.Error())
+		}
+		return paneDirtyMsg{}
+	}
+}
+
+// waitForPaneCmd blocks until the emulator's screen changes. Re-issued on each
+// wakeup, this is what replaces polling: the redraw rate follows the output
+// rather than a timer, and nothing is missed between samples.
+func waitForPaneCmd(p *pane.Pane) tea.Cmd {
+	return func() tea.Msg {
+		<-p.Dirty()
+		return paneDirtyMsg{}
+	}
 }
 
 func (m *Model) sel() *session.Session {
@@ -674,8 +750,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case previewMsg:
+		// A poll result is only allowed to fill a gap. Once the stream is up it
+		// is strictly fresher, and letting a late capture-pane land on top of it
+		// would make the preview flicker backwards in time.
+		if m.stream != nil && msg.name == m.stream.Session() {
+			return m, nil
+		}
 		m.preview, m.previewName = msg.text, msg.name
 		return m, nil
+
+	case paneOpenMsg:
+		m.streamOpening = false
+		if msg.err != "" {
+			// One attempt, then stay on polling for the rest of the session.
+			// This is a capability difference, not a fault, so it goes to the
+			// status line rather than being presented as an error.
+			m.streamOff = true
+			m.say("live preview unavailable, polling instead: " + msg.err)
+			return m, nil
+		}
+		m.stream = msg.p
+		return m, tea.Batch(waitForPaneCmd(msg.p), m.capture())
+
+	case paneDirtyMsg:
+		if m.stream == nil {
+			return m, nil
+		}
+		m.preview, m.previewName = m.stream.Text(), m.stream.Session()
+		return m, waitForPaneCmd(m.stream)
 
 	case statusMsg:
 		m.say(string(msg))
@@ -978,4 +1080,12 @@ func (m *Model) Warn(s string) {
 }
 
 // Close releases the notifier's handle on the terminal.
-func (m *Model) Close() { m.notify.Close() }
+func (m *Model) Close() {
+	// The control client is a process holding a pty. Leaving it behind would
+	// keep a client attached to the tmux server after orbit has gone.
+	if m.stream != nil {
+		m.stream.Close()
+		m.stream = nil
+	}
+	m.notify.Close()
+}
