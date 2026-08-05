@@ -219,7 +219,7 @@ func Record(agent, event string, stdin io.Reader) error {
 
 // Load returns the recorded state for a session, if any.
 func Load(agent, id string) (State, bool) {
-	b, err := os.ReadFile(file(sanitize(agent), sanitize(id)))
+	b, err := os.ReadFile(file(agent, id))
 	if err != nil {
 		return State{}, false
 	}
@@ -236,7 +236,7 @@ func Load(agent, id string) (State, bool) {
 // SessionEnd hook never fires — and a fresh claude at an idle prompt emits
 // nothing until you type, so a stale claim would stand indefinitely.
 func Forget(agent, id string) {
-	os.Remove(file(sanitize(agent), sanitize(id)))
+	os.Remove(file(agent, id))
 }
 
 // Prune removes state files that have not been touched in a while. SessionEnd
@@ -258,7 +258,12 @@ func Prune(olderThan time.Duration) {
 	}
 }
 
-func file(agent, id string) string { return filepath.Join(Dir(), agent+"-"+id+".json") }
+// file sanitizes both parts itself: every caller feeds it values that came
+// from outside this process — argv, a hook payload, a transcript filename —
+// and a choke point cannot be forgotten the way call-site discipline can.
+func file(agent, id string) string {
+	return filepath.Join(Dir(), sanitize(agent)+"-"+sanitize(id)+".json")
+}
 
 // sanitize keeps a value usable as a filename component. Ids are UUIDs from
 // the agents' own stores and the agent name is orbit's own argv, but both

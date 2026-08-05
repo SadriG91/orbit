@@ -2,13 +2,13 @@ package session
 
 import (
 	"encoding/json"
-	"github.com/sadrig91/orbit/internal/hooks"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sadrig91/orbit/internal/hooks"
 	"github.com/sadrig91/orbit/internal/tmux"
 )
 
