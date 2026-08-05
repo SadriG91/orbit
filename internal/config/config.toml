@@ -56,23 +56,32 @@ max_input_chars = 12000
 
 # One command per provider, so each summary is billed to that agent's own
 # subscription and no API keys are needed. The transcript excerpt arrives on
-# stdin; the command should print a summary to stdout. Pick the cheapest model
-# each provider offers — this is a summarising job, not a reasoning one.
+# stdin; the command should print a summary to stdout.
 #
-# The don't-persist flags matter as much as the model. These CLIs record a run
-# as a real session, so without them every summary leaves a conversation of
-# orbit's own lying about — one that can be resumed, sorted by tokens, and
-# summarised in turn. Copilot has no such flag; orbit runs all of them in a
-# directory of its own so what it cannot prevent it can at least keep out of
-# your projects.
+# orbit owns these commands and updates them with each release, so they are
+# not written here. They depend on things that change underneath us: which
+# flag stops a CLI recording a session of its own, which models a provider
+# will actually accept, which subcommand the installed version has. A copy
+# frozen into your file on the day you installed orbit would go wrong quietly.
+#
+# To take one over, write it yourself:
+#
+#   [summary.codex]
+#   command = ["codex", "exec", "--ephemeral", "--model", "something-cheaper"]
+#
+# orbit then leaves it alone for good. If you do, keep the flag that stops the
+# CLI recording a session — --no-session-persistence for claude, --ephemeral
+# for codex — or every summary leaves a conversation of orbit's own behind,
+# resumable and counted in the token sort. Copilot has no such flag, so orbit
+# runs all three in ~/.cache/orbit/scratch and hides sessions found there.
 [summary.claude]
 command = ["claude", "-p", "--no-session-persistence", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
 # max_input_chars = 24000
 
-# No --model here on purpose: gpt-5-mini is rejected outright by ChatGPT-account
-# logins ("not supported when using Codex with a ChatGPT account"), which made
-# codex summaries fail for anyone signed in that way. The account default works
-# everywhere; add --model back if yours offers something cheaper.
+# If you set a codex command, don't reach for --model gpt-5-mini: ChatGPT-account
+# logins refuse it outright ("not supported when using Codex with a ChatGPT
+# account"), which is why the default names no model at all and takes whatever
+# the account gives it.
 [summary.codex]
 command = ["codex", "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check"]
 

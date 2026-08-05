@@ -54,7 +54,7 @@ func main() {
 	// to it, so a new feature is visible where people look for it. Values
 	// already there are never touched, and a failure here is not worth
 	// mentioning — the config still loads, defaults still apply.
-	addedKeys, _ := config.Sync()
+	addedKeys, retiredKeys, _ := config.Sync()
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -79,6 +79,10 @@ func main() {
 	defer m.Close()
 	if len(addedKeys) > 0 {
 		m.Warn("new settings added to your config: " + strings.Join(addedKeys, ", "))
+	}
+	if len(retiredKeys) > 0 {
+		m.Warn("orbit now manages these and updates them with each release, so they " +
+			"were removed from your config: " + strings.Join(retiredKeys, ", "))
 	}
 	m.Warn(term.Preflight())
 
