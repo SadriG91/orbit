@@ -135,11 +135,21 @@ func (c *Conn) Command(cmd string) ([]string, error) {
 	// Registered before the write, so the reader can never see the %begin
 	// before it knows a command is outstanding.
 	c.pending = append(c.pending, ch)
-	_, err := io.WriteString(c.ptmx, cmd+"\n")
-	c.mu.Unlock()
-	if err != nil {
+	if _, err := io.WriteString(c.ptmx, cmd+"\n"); err != nil {
+		// Take it back off. The command never reached tmux, so no reply will
+		// ever arrive for it, and an entry waiting for a reply that cannot
+		// come misaligns every later one — the next block would be handed to
+		// this caller instead of whoever actually asked for it.
+		//
+		// The opposite of the timeout below, where the command *was* sent and
+		// the entry has to stay for exactly the same reason. Holding the lock
+		// across the write is what makes this safe: nothing else can have
+		// taken the entry in between, so the last one is still ours.
+		c.pending = c.pending[:len(c.pending)-1]
+		c.mu.Unlock()
 		return nil, fmt.Errorf("write command: %w", err)
 	}
+	c.mu.Unlock()
 
 	select {
 	case r := <-ch:
