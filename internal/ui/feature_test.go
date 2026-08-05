@@ -199,3 +199,93 @@ func TestAutoSummariseGuardsSpending(t *testing.T) {
 		t.Error("auto is off by default and must stay off")
 	}
 }
+
+// A poll result that arrives after the stream is up must not overwrite it.
+// capture-pane is issued alongside the dial so the pane isn't blank while
+// connecting, and that reply can land late — painting it over live output
+// would make the preview jump backwards in time.
+func TestStalePollDoesNotOverwriteTheStream(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	m.preview, m.previewName = "live output", "cl-work-1"
+
+	// No stream yet: a poll is the only source, so it wins.
+	m.Update(previewMsg{name: "cl-work-1", text: "polled"})
+	if m.preview != "polled" {
+		t.Errorf("preview = %q, want the poll to fill the gap", m.preview)
+	}
+}
+
+// Failing to open the control client is a capability difference, not a fault:
+// the dashboard has to carry on polling, and must not retry on every keypress.
+func TestStreamFailureLatchesToPolling(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	if m.streamOff {
+		t.Fatal("streaming starts disabled")
+	}
+	m.Update(paneOpenMsg{err: "no pty available"})
+	if !m.streamOff {
+		t.Error("a failed open did not latch streaming off")
+	}
+	if m.stream != nil {
+		t.Error("a failed open left a stream behind")
+	}
+	if !strings.Contains(m.status, "polling instead") {
+		t.Errorf("status = %q, want it to explain the fallback", m.status)
+	}
+}
+
+// With streaming off, capture must go back to the polling path rather than
+// returning nothing — otherwise the preview pane goes permanently blank.
+func TestCaptureFallsBackToPollingWhenStreamingIsOff(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	m.streamOff = true
+	m.view = []*session.Session{{Tmux: &tmux.Session{Name: "cl-work-1"}}}
+	m.cursor = 0
+
+	cmd := m.capture()
+	if cmd == nil {
+		t.Fatal("capture returned no command with streaming off")
+	}
+	msg := cmd()
+	pm, ok := msg.(previewMsg)
+	if !ok {
+		t.Fatalf("capture produced %T, want previewMsg", msg)
+	}
+	if pm.name != "cl-work-1" {
+		t.Errorf("previewMsg.name = %q, want the selected session", pm.name)
+	}
+}
+
+// Nothing selected must not panic or leave a stale preview on screen.
+func TestCaptureWithNoSelection(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	msg := m.capture()()
+	if pm, ok := msg.(previewMsg); !ok || pm.name != "" {
+		t.Errorf("capture with no selection = %#v, want an empty previewMsg", msg)
+	}
+}
+
+// capture runs on every tick, so a handshake slower than one tick must not
+// start a second control client — that would leak a process and a pty, and
+// leave two clients attached to the same tmux server.
+func TestDialIsSingleFlighted(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	m.view = []*session.Session{{Tmux: &tmux.Session{Name: "cl-work-1"}}}
+	m.cursor = 0
+
+	if m.capture(); !m.streamOpening {
+		t.Fatal("the first capture did not mark a dial in flight")
+	}
+	// A second capture while the first is still connecting must fall back to
+	// polling rather than dialling again.
+	msg := m.capture()()
+	if _, ok := msg.(previewMsg); !ok {
+		t.Errorf("capture during a dial produced %T, want a poll", msg)
+	}
+
+	// Once the dial resolves, the flag clears so a later failure can retry.
+	m.Update(paneOpenMsg{err: "nope"})
+	if m.streamOpening {
+		t.Error("the in-flight flag survived the open result")
+	}
+}
