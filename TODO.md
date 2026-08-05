@@ -19,6 +19,19 @@ cursor moving so `switch-client` commands are written into a pty saturated in
 the other direction. Both stayed responsive. `sample` on the live wedged
 process gave nothing — it sees OS threads, and parked goroutines have none.
 
+Review then found a real defect in the same area, since fixed: `waitForPaneCmd`
+waited only on `Dirty()`, so a control client that died left the wait blocked
+forever and the Model still holding a stream, which stopped `capture` falling
+back to polling. **That is probably not this.** It would freeze the *preview*
+while the list, the keys and the tick carried on, and the report was of the
+whole dashboard. Worth knowing it has already been ruled in and fixed, so a
+recurrence is something else.
+
+The same review found five defects across three rounds and **every one was in
+an error or teardown path** — a connection dying, a write failing, a dead
+field, file modes. None in the paths that were tested hardest. If the freeze is
+hunted again, that is the neighbourhood.
+
 So the next occurrence has to be caught in the act:
 
 ```sh
