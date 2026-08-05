@@ -130,6 +130,15 @@ setting.
 **Environment overrides win over the config file**: `ORBIT_ICONS`,
 `ORBIT_SPAWN_DELAY`, `ORBIT_TAB_DELAY`, `ORBIT_NO_UPDATE`.
 
+## Open work
+
+`TODO.md` holds what's outstanding and — more usefully — the measurements
+behind it: why session state is wrong about 1 in 9 times, why the transcript
+can't fix it, and which approaches were tried and rejected. Read it before
+touching state resolution or the live preview. It also records the one open
+risk: an unexplained freeze, and the instruction not to cut a release until it
+has a cause.
+
 ## Conventions
 
 - Unit tests sit beside the code, so they can reach unexported internals.
