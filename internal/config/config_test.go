@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -56,5 +57,38 @@ func TestSummaryInputBudgetIsPerProvider(t *testing.T) {
 	var empty Summary
 	if got := empty.InputBudget("claude"); got <= 0 {
 		t.Error("an unset budget must still resolve to something usable")
+	}
+}
+
+// The agent CLIs record a run as a real session, so a summary leaves a
+// conversation of orbit's own behind unless it is told not to. Both flags were
+// verified against the real CLIs — claude wrote no transcript anywhere, codex
+// no rollout — and neither is discoverable from the failure, since a summary
+// that leaves litter still returns a perfectly good summary.
+func TestSummaryDefaultsDoNotPersistSessions(t *testing.T) {
+	cfg, err := LoadDefaults()
+	if err != nil {
+		t.Fatalf("LoadDefaults: %v", err)
+	}
+	for _, tt := range []struct{ agent, flag string }{
+		{"claude", "--no-session-persistence"},
+		{"codex", "--ephemeral"},
+	} {
+		if !slices.Contains(cfg.Summary.For(tt.agent), tt.flag) {
+			t.Errorf("%s summary command is missing %s: %q",
+				tt.agent, tt.flag, cfg.Summary.For(tt.agent))
+		}
+	}
+
+	// Copilot has no such flag. If one ever appears this should be revisited,
+	// but until then it relies on session.ScratchDir to stay out of the way.
+	if len(cfg.Summary.For("copilot")) == 0 {
+		t.Error("copilot has no summary command at all")
+	}
+
+	// gpt-5-mini is refused by ChatGPT-account logins, which broke codex
+	// summaries outright for anyone signed in that way.
+	if slices.Contains(cfg.Summary.For("codex"), "gpt-5-mini") {
+		t.Error("the codex default is back on gpt-5-mini, which ChatGPT accounts reject")
 	}
 }

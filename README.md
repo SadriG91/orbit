@@ -160,8 +160,15 @@ summarising job rather than a reasoning one:
 
 ```toml
 [summary.claude]
-command = ["claude", "-p", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
+command = ["claude", "-p", "--no-session-persistence", "--model", "claude-haiku-4-5-20251001", "--allowed-tools", ""]
 ```
+
+Keep the don't-persist flag if you change the command. These CLIs record a run
+as a real session, so without `--no-session-persistence` (claude) or
+`--ephemeral` (codex) every summary leaves a conversation of orbit's own on
+disk — resumable, counted in the token sort, and summarisable in turn. Copilot
+has no equivalent flag, so orbit runs all three in `~/.cache/orbit/scratch` and
+hides sessions found there.
 
 Generation takes around ten seconds and runs in the background. The bar in the
 header is global and measures *coverage* — how many of the sessions on screen
