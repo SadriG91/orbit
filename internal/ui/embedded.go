@@ -5,6 +5,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/sadrig91/orbit/internal/pane"
 	"github.com/sadrig91/orbit/internal/session"
@@ -339,7 +340,7 @@ func terminalFrameReady(screen string) bool {
 			continue
 		}
 		lines++
-		visible += len([]rune(line))
+		visible += lipgloss.Width(line)
 	}
 	return lines >= 2 && visible >= 16
 }
