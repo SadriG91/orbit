@@ -77,11 +77,13 @@ Two reasons inference cannot win:
 
 Hooks deliver it as events instead.
 
-| | approval event | `session_id` | how orbit installs it |
-|---|---|---|---|
-| Claude Code | `PermissionRequest`, `Notification[permission_prompt]` | yes | `--settings '<inline json>'` — no file at all |
-| Codex | `PermissionRequest` | yes | `~/.codex/hooks.json`, a dedicated file; layers are additive |
-| Copilot | none documented (`preToolUse` closest) | not in the sample payload | `~/.copilot/hooks/orbit.json`, a directory |
+All three verified by actually firing them, not from the docs:
+
+| | verified events | approval event | join key | how orbit installs it |
+|---|---|---|---|---|
+| Claude Code | full chain, interactive TUI | `PermissionRequest`, same second as the prompt | `session_id` | `--settings <file>` per spawn — nothing global |
+| Codex | `SessionStart` clean; `UserPromptSubmit`/`PostToolUse`/`Stop` fired (payloads carry `session_id`, `turn_id`, `tool_use_id`) | `PermissionRequest` documented, **not yet verified interactively** | `session_id` | `-c 'hooks.X=[...]'` inline per spawn — works, but trust-gated: skipped with a startup warning until the user approves once via `/hooks` (test used the bypass flag, which must never ship) |
+| Copilot | `userPromptSubmitted`, `sessionStart`, `preToolUse`, `postToolUse`, `agentStop`, `sessionEnd` | **none exists** — pending `preToolUse` without `postToolUse` is the proxy, title-stillness the tiebreaker | `sessionId` — present in every real payload; the docs' sample was incomplete | `~/.copilot/hooks/orbit.json` — additive file, read at startup, **but global: fires for the user's own copilot runs too**, so it needs saying and an uninstall |
 
 Nothing needs to modify a file the user wrote. Claude's `--settings` accepts
 inline JSON and was verified end to end: the hook fired, the payload carried
