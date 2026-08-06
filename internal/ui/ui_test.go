@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/sadrig91/orbit/internal/config"
 	"github.com/sadrig91/orbit/internal/format"
+	"github.com/sadrig91/orbit/internal/search"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/tmux"
 )
@@ -69,7 +70,7 @@ func TestViewRenders(t *testing.T) {
 	m.group = groupProject
 	m.rebuild()
 	compact := m.render()
-	for _, want := range []string{"SESSIONS · RECENT · BY AGE ·…", "▸ work/api-gateway · 1"} {
+	for _, want := range []string{"▶ SESSIONS · RECENT · BY AGE", "▸ work/api-gateway · 1"} {
 		if !strings.Contains(compact, want) {
 			t.Errorf("80x24 grouped view missing %q", want)
 		}
@@ -106,7 +107,7 @@ func TestShortcutHelpKeepsTheFooterFocused(t *testing.T) {
 		t.Fatal("? did not open shortcut help")
 	}
 	help := stripANSI(m.render())
-	for _, want := range []string{"KEYBOARD SHORTCUTS", "previous session", "focus live pane", "search transcripts", "sort / group", "ctrl+g", "full screen", "quit"} {
+	for _, want := range []string{"KEYBOARD SHORTCUTS", "previous session", "next attention", "focus live pane", "search transcripts", "sort / group", "ctrl+g", "full screen", "quit"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("shortcut help missing %q:\n%s", want, help)
 		}
@@ -128,6 +129,191 @@ func TestShortcutHelpKeepsTheFooterFocused(t *testing.T) {
 	m.key(tea.KeyPressMsg{Code: tea.KeyEscape})
 	if m.showHelp {
 		t.Error("escape did not close shortcut help")
+	}
+}
+
+func TestErrorsStayVisibleUntilDismissed(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 80, 24
+	m.say("preview unavailable: tmux failed")
+	m.statusUntil = time.Now().Add(-time.Minute)
+	if notice, _ := m.headerNotice(); notice == "" {
+		t.Fatal("an expired error disappeared instead of remaining sticky")
+	}
+	m.key(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.status != "" || m.statusSticky {
+		t.Errorf("Esc did not dismiss sticky error: status=%q sticky=%v", m.status, m.statusSticky)
+	}
+	if m.lastError == "" {
+		t.Error("dismissing the notice also erased its diagnostic history")
+	}
+
+	m.say("refreshing")
+	m.statusUntil = time.Now().Add(-time.Minute)
+	if notice, _ := m.headerNotice(); notice != "" {
+		t.Errorf("transient success stayed visible: %q", notice)
+	}
+}
+
+func TestDiagnosticsOwnsAn80x24Frame(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 80, 24
+	m.version = "v-test"
+	m.lastScan, m.lastScanCount = time.Now(), 12
+	m.lastError, m.lastErrorAt = "scan failed", time.Now()
+	m.dumpPath = "/tmp/orbit-stacks.log"
+	m.diagnostics = diagnosticSnapshot{
+		captured: time.Now(), tmux: "3.5a",
+		agents: []string{"claude: installed", "codex: installed", "copilot: missing"},
+	}
+	m.diagnosticsOpen = true
+	out := m.render()
+	plain := stripANSI(out)
+	for _, want := range []string{"DIAGNOSTICS", "v-test", "3.5a", "12 sessions", "PREVIEW", "scan failed", "orbit-stacks.log", "clear last error"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("diagnostics missing %q:\n%s", want, plain)
+		}
+	}
+	assertFrameSize(t, m, out)
+}
+
+func TestCompactHeaderAndAccessibilityModes(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("ORBIT_REDUCED_MOTION", "1")
+	t.Setenv("TERM", "xterm-kitty")
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 80, 24
+	m.scanning = true
+
+	if got := lipgloss.Height(m.header()); got != 1 {
+		t.Errorf("80x24 header is %d rows, want a single compact row", got)
+	}
+	if m.icons != IconText {
+		t.Error("NO_COLOR did not force text agent markers")
+	}
+	if got := m.activityMark(); got != "•" {
+		t.Errorf("reduced-motion activity mark = %q, want static dot", got)
+	}
+	view := m.View()
+	if strings.Contains(view.Content, "\x1b[") {
+		t.Error("NO_COLOR view still contains ANSI styling")
+	}
+	if !strings.Contains(view.Content, "• Scanning sessions") {
+		t.Errorf("reduced-motion empty state missing static activity mark:\n%s", view.Content)
+	}
+	assertFrameSize(t, m, view.Content)
+
+	m.noColor = false
+	m.w, m.h = 100, 30
+	if got := lipgloss.Height(m.header()); got != len(bannerSmall) {
+		t.Errorf("100x30 header is %d rows, want small banner height %d", got, len(bannerSmall))
+	}
+	m.w, m.h = 150, 44
+	if got := lipgloss.Height(m.header()); got != len(bannerFull) {
+		t.Errorf("150x44 header is %d rows, want full banner height %d", got, len(bannerFull))
+	}
+}
+
+func TestAttentionKeysCycleWithoutChangingListOrder(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.all = []*session.Session{
+		{Agent: session.Claude, ID: "idle-a", Title: "idle a", Modified: time.Now()},
+		{Agent: session.Codex, ID: "attention-a", Title: "review approval", State: session.NeedsApproval, Modified: time.Now()},
+		{Agent: session.Copilot, ID: "idle-b", Title: "idle b", Modified: time.Now()},
+		{Agent: session.Claude, ID: "attention-b", Title: "answer question", State: session.NeedsApproval, Modified: time.Now()},
+	}
+	m.rebuild()
+
+	press := func(key rune) {
+		m.key(tea.KeyPressMsg{Code: key, Text: string(key)})
+	}
+	press(']')
+	if m.sel().ID != "attention-a" || !strings.Contains(m.status, "attention 1 of 2") {
+		t.Fatalf("first jump selected %q with status %q", m.sel().ID, m.status)
+	}
+	press(']')
+	if m.sel().ID != "attention-b" || !strings.Contains(m.status, "attention 2 of 2") {
+		t.Fatalf("second jump selected %q with status %q", m.sel().ID, m.status)
+	}
+	press(']')
+	if m.sel().ID != "attention-a" {
+		t.Fatalf("next attention did not wrap: %q", m.sel().ID)
+	}
+	press('[')
+	if m.sel().ID != "attention-b" {
+		t.Fatalf("previous attention did not wrap: %q", m.sel().ID)
+	}
+
+	got := []string{m.view[0].ID, m.view[1].ID, m.view[2].ID, m.view[3].ID}
+	want := []string{"idle-a", "attention-a", "idle-b", "attention-b"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("attention navigation reordered sessions: %v", got)
+	}
+}
+
+func TestAttentionJumpExplainsHiddenAndEmptyResults(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.all = []*session.Session{{
+		Agent: session.Claude, ID: "attention", Cwd: "/work/hidden", Title: "hidden",
+		State: session.NeedsApproval, Modified: time.Now(),
+	}}
+	m.filter.SetValue("does-not-match")
+	m.rebuild()
+	m.moveAttention(1)
+	if !strings.Contains(m.status, "hidden by the current filter or search") {
+		t.Errorf("hidden attention status = %q", m.status)
+	}
+
+	m.all[0].State = session.YourTurn
+	m.moveAttention(1)
+	if m.status != "no sessions need attention" {
+		t.Errorf("empty attention status = %q", m.status)
+	}
+}
+
+func TestKillRequiresConfirmationAndPinsTheTarget(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 80, 24
+	m.all = []*session.Session{
+		{
+			Agent: session.Claude, ID: "first", Cwd: "/work/first", Title: "First live session",
+			Modified: time.Now(), Tmux: &tmux.Session{Name: "cl-first"},
+		},
+		{
+			Agent: session.Codex, ID: "second", Cwd: "/work/second", Title: "Second live session",
+			Modified: time.Now().Add(-time.Minute), Tmux: &tmux.Session{Name: "cx-second"},
+		},
+	}
+	m.rebuild()
+
+	_, cmd := m.key(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if cmd != nil || m.killConfirm == nil {
+		t.Fatalf("x executed immediately: cmd=%v confirmation=%#v", cmd != nil, m.killConfirm)
+	}
+	if m.killConfirm.tmux != "cl-first" {
+		t.Fatalf("confirmation target = %q, want cl-first", m.killConfirm.tmux)
+	}
+	frame := stripANSI(m.render())
+	for _, want := range []string{"CONFIRM KILL", "INPUT LOCKED", "KILL LIVE SESSION?", "First live session", "/work/first", "transcript and summary will be kept", "kill session", "cancel"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("confirmation frame missing %q:\n%s", want, frame)
+		}
+	}
+	assertFrameSize(t, m, m.render())
+
+	m.key(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.cursor != 0 || m.killConfirm.tmux != "cl-first" {
+		t.Error("navigation changed the dashboard or confirmation target under the modal")
+	}
+	m.key(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.killConfirm != nil || m.status != "kill cancelled" {
+		t.Errorf("escape did not cancel cleanly: confirmation=%#v status=%q", m.killConfirm, m.status)
+	}
+
+	m.key(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	_, cmd = m.key(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil || m.killConfirm != nil {
+		t.Errorf("enter did not accept the confirmation: cmd=%v confirmation=%#v", cmd != nil, m.killConfirm)
 	}
 }
 
@@ -176,6 +362,72 @@ func TestFilterAndDetail(t *testing.T) {
 	}
 	if d := strings.Join(m.detail(50, 20), "\n"); !strings.Contains(d, "Tune widget layout") {
 		t.Errorf("detail pane missing title:\n%s", d)
+	}
+}
+
+func TestEmptyListExplainsTheCurrentState(t *testing.T) {
+	now := time.Now()
+	old := &session.Session{
+		Agent: session.Claude, ID: "old", Cwd: format.Home("work", "old"),
+		Title: "Old session", Modified: now.AddDate(0, 0, -90),
+	}
+	tests := []struct {
+		name  string
+		setup func(*Model)
+		want  []string
+	}{
+		{
+			name:  "initial scan",
+			setup: func(m *Model) { m.scanning = true },
+			want:  []string{"Scanning sessions", "Found sessions appear here"},
+		},
+		{
+			name:  "no sessions",
+			setup: func(*Model) {},
+			want:  []string{"No agent sessions found", "d dispatch a task"},
+		},
+		{
+			name: "recent scope hides everything",
+			setup: func(m *Model) {
+				m.all = []*session.Session{old}
+				m.rebuild()
+			},
+			want: []string{"No recent titled sessions", "a show all sessions"},
+		},
+		{
+			name: "quick filter",
+			setup: func(m *Model) {
+				m.all = []*session.Session{{Agent: session.Codex, ID: "one", Cwd: "/work/one", Title: "One", Modified: now}}
+				m.filtering = true
+				m.filter.SetValue("missing")
+				m.rebuild()
+			},
+			want: []string{"No title or path matches", "esc clear filter"},
+		},
+		{
+			name: "transcript search",
+			setup: func(m *Model) {
+				m.all = []*session.Session{{Agent: session.Copilot, ID: "one", Cwd: "/work/one", Title: "One", Modified: now}}
+				m.query = "missing phrase"
+				m.matches = map[string]search.Match{}
+				m.rebuild()
+			},
+			want: []string{"No transcript matches", "esc clear search"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel(testConfig(), attachInline)
+			m.w, m.h = 80, 24
+			tt.setup(m)
+			got := stripANSI(strings.Join(m.list(36, 12), "\n"))
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("empty state missing %q:\n%s", want, got)
+				}
+			}
+		})
 	}
 }
 

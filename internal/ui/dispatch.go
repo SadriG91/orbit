@@ -236,16 +236,55 @@ func (m *Model) updateDispatchInput(msg tea.Msg) tea.Cmd {
 	if m.dispatchDirFocused {
 		m.dispatchDir, cmd = m.dispatchDir.Update(msg)
 		m.dispatchDirCursor = -1
-	} else {
+	} else if !m.composerAgentFocused && m.dispatching {
 		m.filter, cmd = m.filter.Update(msg)
 	}
 	return cmd
 }
 
-func (m *Model) focusDispatchDirectory(on bool) tea.Cmd {
-	m.dispatchDirFocused = on
-	if on {
+func (m *Model) beginComposer(newSession bool) {
+	ag, cwd := m.dispatchTarget()
+	m.dispatchTo, m.dispatchInto = ag, cwd
+	m.newing, m.dispatching = newSession, !newSession
+	m.filtering = !newSession
+	m.composerAgentFocused = newSession
+	m.dispatchDirFocused = false
+	m.dispatchDirCursor = -1
+	m.status = ""
+	m.filter.Prompt = "› "
+	m.filter.Placeholder = "describe the task"
+	m.filter.CharLimit = 4000
+	m.filter.SetValue("")
+	m.dispatchDir.Prompt = "› "
+	m.dispatchDir.SetValue(cwd)
+	m.dispatchDir.Blur()
+	if newSession {
 		m.filter.Blur()
+	} else {
+		m.filter.Focus()
+	}
+}
+
+func (m *Model) cycleComposerAgent(delta int) {
+	ix := 0
+	for i, ag := range session.AllAgents {
+		if ag == m.dispatchTo {
+			ix = i
+			break
+		}
+	}
+	m.dispatchTo = session.AllAgents[(ix+delta+len(session.AllAgents))%len(session.AllAgents)]
+}
+
+func (m *Model) focusComposer(field int) tea.Cmd {
+	m.composerAgentFocused = field == 1
+	m.dispatchDirFocused = field == 2
+	m.filter.Blur()
+	m.dispatchDir.Blur()
+	if field == 0 {
+		return m.filter.Focus()
+	}
+	if field == 2 {
 		m.dispatchDirCursor = -1
 		for i, dir := range m.dispatchDirectories() {
 			if dir == m.dispatchDir.Value() {
@@ -255,8 +294,14 @@ func (m *Model) focusDispatchDirectory(on bool) tea.Cmd {
 		}
 		return m.dispatchDir.Focus()
 	}
-	m.dispatchDir.Blur()
-	return m.filter.Focus()
+	return nil
+}
+
+func (m *Model) focusDispatchDirectory(on bool) tea.Cmd {
+	if on {
+		return m.focusComposer(2)
+	}
+	return m.focusComposer(0)
 }
 
 // dispatchDirectories supplies the inline picker in recent-session order.
@@ -306,8 +351,36 @@ func (m *Model) dispatchKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.resetPrompt()
 		m.rebuild()
 		return nil
-	case "tab", "shift+tab":
-		return m.focusDispatchDirectory(!m.dispatchDirFocused)
+	case "tab":
+		switch {
+		case m.dispatchDirFocused:
+			return m.focusComposer(0)
+		case m.composerAgentFocused:
+			return m.focusComposer(2)
+		default:
+			return m.focusComposer(1)
+		}
+	case "shift+tab":
+		switch {
+		case m.dispatchDirFocused:
+			return m.focusComposer(1)
+		case m.composerAgentFocused:
+			return m.focusComposer(0)
+		default:
+			return m.focusComposer(2)
+		}
+	case "left", "h":
+		if m.composerAgentFocused {
+			m.cycleComposerAgent(-1)
+			return nil
+		}
+		return m.updateDispatchInput(msg)
+	case "right", "l":
+		if m.composerAgentFocused {
+			m.cycleComposerAgent(1)
+			return nil
+		}
+		return m.updateDispatchInput(msg)
 	case "up":
 		if m.dispatchDirFocused {
 			m.moveDispatchDirectory(-1)
@@ -323,6 +396,9 @@ func (m *Model) dispatchKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "enter":
 		if m.dispatchDirFocused {
 			return m.focusDispatchDirectory(false)
+		}
+		if m.composerAgentFocused {
+			return m.focusComposer(0)
 		}
 		ag, task, err := parseDispatchPrompt(m.filter.Value(), m.dispatchTo)
 		if err != nil {
@@ -347,6 +423,57 @@ func (m *Model) dispatchKey(msg tea.KeyPressMsg) tea.Cmd {
 	default:
 		return m.updateDispatchInput(msg)
 	}
+}
+
+func (m *Model) newSessionKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.dispatchDir.SetValue("")
+		m.resetPrompt()
+		return nil
+	case "tab", "shift+tab":
+		if m.dispatchDirFocused {
+			return m.focusComposer(1)
+		}
+		return m.focusComposer(2)
+	case "left", "h":
+		if m.composerAgentFocused {
+			m.cycleComposerAgent(-1)
+			return nil
+		}
+		return m.updateDispatchInput(msg)
+	case "right", "l":
+		if m.composerAgentFocused {
+			m.cycleComposerAgent(1)
+			return nil
+		}
+		return m.updateDispatchInput(msg)
+	case "up":
+		if m.dispatchDirFocused {
+			m.moveDispatchDirectory(-1)
+			return nil
+		}
+	case "down":
+		if m.dispatchDirFocused {
+			m.moveDispatchDirectory(1)
+			return nil
+		}
+	case "enter":
+		base, err := os.Getwd()
+		if err != nil {
+			base = m.dispatchInto
+		}
+		cwd, err := resolveDispatchDir(m.dispatchDir.Value(), base)
+		if err != nil {
+			m.say(err.Error())
+			return m.focusComposer(2)
+		}
+		ag := m.dispatchTo
+		m.dispatchDir.SetValue("")
+		m.resetPrompt()
+		return m.spawn(ag, cwd)
+	}
+	return m.updateDispatchInput(msg)
 }
 
 // dispatchLine is the one-line account of a dispatch for the detail pane.

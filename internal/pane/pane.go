@@ -107,6 +107,15 @@ func (p *Pane) Scrolled() bool {
 	return p.scrollOffset > 0
 }
 
+// ScrollOffset is how many history rows above the live tail Render is showing.
+// The UI uses it to make scrollback distance explicit instead of presenting a
+// frozen terminal with only a colour change as explanation.
+func (p *Pane) ScrollOffset() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.scrollOffset
+}
+
 // FollowTail returns Render to the live pane. Keyboard input always calls this
 // first, matching ordinary terminal behavior where typing resumes at the prompt.
 func (p *Pane) FollowTail() {

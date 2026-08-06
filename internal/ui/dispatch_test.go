@@ -152,8 +152,12 @@ func TestDispatchComposerFocusAndValidation(t *testing.T) {
 	m.filter.SetValue("@codex check feature X")
 
 	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !m.composerAgentFocused || m.filter.Focused() {
+		t.Fatal("first Tab did not move focus from task to agent")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if !m.dispatchDirFocused || !m.dispatchDir.Focused() || m.filter.Focused() {
-		t.Fatal("Tab did not move focus from task to directory")
+		t.Fatal("second Tab did not move focus from agent to directory")
 	}
 	m.dispatchDir.SetValue("")
 	typeInto(m, filepath.Join(t.TempDir(), "missing"))
@@ -217,6 +221,7 @@ func TestDispatchDirectoryPickerUsesKnownProjects(t *testing.T) {
 	press(m, "d")
 
 	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if !m.dispatchDirFocused || m.dispatchDirCursor != 0 {
 		t.Fatalf("directory picker did not select its default: focused=%v cursor=%d", m.dispatchDirFocused, m.dispatchDirCursor)
 	}
@@ -231,6 +236,42 @@ func TestDispatchDirectoryPickerUsesKnownProjects(t *testing.T) {
 	}
 	if len(m.view) != 2 {
 		t.Error("directory picker changed the mounted Sessions list")
+	}
+}
+
+func TestNewSessionComposerWorksWithoutSessions(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 80, 24
+	press(m, "n")
+	if !m.newing || !m.composerAgentFocused {
+		t.Fatalf("n did not open the agent-first composer: newing=%v agentFocused=%v", m.newing, m.composerAgentFocused)
+	}
+	plain := stripANSI(m.render())
+	for _, want := range []string{"NEW SESSION", "AGENT · FOCUSED", "[", "DIRECTORY", "start"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("new composer missing %q:\n%s", want, plain)
+		}
+	}
+	if got := lipgloss.Height(m.render()); got != 24 {
+		t.Errorf("new composer is %d rows, want 24", got)
+	}
+}
+
+func TestNewSessionComposerSelectsAgentAndValidatesDirectory(t *testing.T) {
+	m := modelWithSession(t, session.Claude)
+	press(m, "n")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.dispatchTo != session.Codex {
+		t.Errorf("Right selected %s, want codex", m.dispatchTo)
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !m.dispatchDirFocused {
+		t.Fatal("Tab did not focus the new-session directory")
+	}
+	m.dispatchDir.SetValue(filepath.Join(t.TempDir(), "missing"))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.newing || !m.dispatchDirFocused || !strings.Contains(m.status, "directory") {
+		t.Fatalf("invalid directory did not stay open and focused: newing=%v focused=%v status=%q", m.newing, m.dispatchDirFocused, m.status)
 	}
 }
 
