@@ -278,6 +278,30 @@ func TestUnfocusedTerminalDropsAgentColours(t *testing.T) {
 	}
 }
 
+func TestFocusedAndScrolledTerminalUseExplicitLabels(t *testing.T) {
+	m := modelWithSession(t, session.Codex)
+	m.w, m.h = 100, 30
+	m.all[0].Tmux = &tmux.Session{Name: "cx-work", AgentRunning: true}
+	m.rebuild()
+	f := newFakePane("cx-work")
+	m.stream = f
+	m.embedded, m.embeddedName, m.embeddedCwd = "cx-work", "agent session", m.all[0].Cwd
+	m.terminalFocused = true
+
+	frame := stripANSI(m.render())
+	for _, want := range []string{"▶ TERMINAL · FOCUSED"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("focused terminal missing %q:\n%s", want, frame)
+		}
+	}
+
+	f.scrolled = true
+	frame = stripANSI(m.render())
+	if !strings.Contains(frame, "SCROLLBACK · 3 LINES UP") {
+		t.Errorf("scrollback distance missing:\n%s", frame)
+	}
+}
+
 func TestTabResumesADormantSessionForTheLivePane(t *testing.T) {
 	stub := t.TempDir()
 	if err := os.WriteFile(filepath.Join(stub, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {

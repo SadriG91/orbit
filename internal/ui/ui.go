@@ -203,7 +203,18 @@ type (
 		name, err string
 	}
 	paneInputDoneMsg struct{ err string }
+	diagnosticsMsg   diagnosticSnapshot
 )
+
+type killConfirmation struct {
+	tmux, title, cwd string
+}
+
+type diagnosticSnapshot struct {
+	captured time.Time
+	tmux     string
+	agents   []string
+}
 
 type Model struct {
 	ix     *session.Index
@@ -213,22 +224,26 @@ type Model struct {
 	top    int
 	w, h   int
 
-	filter      textinput.Model
-	dispatchDir textinput.Model
-	spin        spinner.Model
-	filtering   bool
-	showAll     bool
-	showHelp    bool
+	filter          textinput.Model
+	dispatchDir     textinput.Model
+	spin            spinner.Model
+	filtering       bool
+	showAll         bool
+	showHelp        bool
+	diagnosticsOpen bool
+	killConfirm     *killConfirmation
 
 	// The dispatch prompt. Target is captured when `d` is pressed rather than
 	// read back when Enter is: a scan landing mid-typing re-sorts the list and
 	// moves the cursor, and the task you were writing belongs to the session
 	// you were looking at when you started writing it.
-	dispatching        bool
-	dispatchTo         session.Agent
-	dispatchInto       string
-	dispatchDirFocused bool
-	dispatchDirCursor  int
+	dispatching          bool
+	newing               bool
+	dispatchTo           session.Agent
+	dispatchInto         string
+	composerAgentFocused bool
+	dispatchDirFocused   bool
+	dispatchDirCursor    int
 
 	preview     string
 	previewName string
@@ -262,20 +277,27 @@ type Model struct {
 	// is ready or the resume fails.
 	preparing *drivePreparation
 
-	status      string
-	statusUntil time.Time
-	mode        attachMode
-	icons       IconMode
-	logosSent   bool
-	cfg         config.Config
-	sort        session.SortMode
-	group       groupMode
+	status        string
+	statusUntil   time.Time
+	statusSticky  bool
+	lastError     string
+	lastErrorAt   time.Time
+	mode          attachMode
+	icons         IconMode
+	noColor       bool
+	reducedMotion bool
+	logosSent     bool
+	cfg           config.Config
+	sort          session.SortMode
+	group         groupMode
 
-	scanning  bool      // a scan is in flight; see scanCmd
-	rescan    bool      // an explicit refresh arrived mid-scan and owes us another
-	scanGen   int       // increments per issued scan; stale results are discarded
-	scanStart time.Time // when the in-flight scan began, for the watchdog
-	pruned    bool      // the summary cache has been swept once, after the first scan
+	scanning      bool      // a scan is in flight; see scanCmd
+	rescan        bool      // an explicit refresh arrived mid-scan and owes us another
+	scanGen       int       // increments per issued scan; stale results are discarded
+	scanStart     time.Time // when the in-flight scan began, for the watchdog
+	lastScan      time.Time
+	lastScanCount int
+	pruned        bool // the summary cache has been swept once, after the first scan
 
 	searching bool
 	query     string                    // the committed full-text query
@@ -287,7 +309,8 @@ type Model struct {
 	summaryE  time.Duration // rolling estimate, shown as elapsed context only
 	notify    *Notifier
 
-	dumpPath string // where SIGUSR1 writes goroutine stacks; see internal/debug
+	dumpPath    string // where SIGUSR1 writes goroutine stacks; see internal/debug
+	diagnostics diagnosticSnapshot
 
 	version  string // this build, for the update check
 	updating bool   // an update is in flight; keeps the spinner running
@@ -310,9 +333,14 @@ func New(cfg config.Config, attachOverride, version string) *Model {
 	dir.CharLimit = 4096
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(cBright)
+	icons := ResolveIconMode(cfg.IconMode())
+	noColor := os.Getenv("NO_COLOR") != ""
+	if noColor {
+		icons = IconText
+	}
 	return &Model{
 		ix: session.NewIndex(), filter: ti, dispatchDir: dir, spin: sp, mode: mode, version: version,
-		cfg: cfg, icons: ResolveIconMode(cfg.IconMode()), sort: session.ParseSortMode(cfg.Sort), group: parseGroupMode(cfg.Group, cfg.GroupBy),
+		cfg: cfg, icons: icons, noColor: noColor, reducedMotion: os.Getenv("ORBIT_REDUCED_MOTION") != "", sort: session.ParseSortMode(cfg.Sort), group: parseGroupMode(cfg.Group, cfg.GroupBy),
 		summaries: map[string]summary.Record{}, pending: map[string]time.Time{},
 		notify:   NewNotifier(cfg.Notify),
 		prog:     progress.New(progress.WithColors(lipgloss.Color("#1f8a54"), lipgloss.Color("#00ff87")), progress.WithoutPercentage()),
@@ -591,6 +619,7 @@ type livePane interface {
 	SendTextTo(string, string) error
 	SendWheelTo(string, int, int, pane.WheelDirection) error
 	Scrolled() bool
+	ScrollOffset() int
 	FollowTail()
 	Dirty() <-chan struct{}
 	Done() <-chan struct{}
@@ -665,6 +694,8 @@ func save(what string, write func() error) tea.Cmd {
 func (m *Model) resetPrompt() {
 	m.searching = false
 	m.dispatching = false
+	m.newing = false
+	m.composerAgentFocused = false
 	m.dispatchDirFocused = false
 	m.dispatchDirCursor = -1
 	m.dispatchDir.Blur()
@@ -678,6 +709,53 @@ func (m *Model) sel() *session.Session {
 		return nil
 	}
 	return m.view[m.cursor]
+}
+
+// moveAttention jumps among visible sessions that need a person without
+// changing the user's sort, grouping or filter. Attention is Orbit's primary
+// signal; making the header count visible but not navigable leaves the user to
+// hunt for triangles below the fold.
+func (m *Model) moveAttention(delta int) tea.Cmd {
+	var indices []int
+	for i, s := range m.view {
+		if s.State == session.NeedsApproval {
+			indices = append(indices, i)
+		}
+	}
+	if len(indices) == 0 {
+		for _, s := range m.all {
+			if s.State == session.NeedsApproval {
+				m.say("attention sessions are hidden by the current filter or search")
+				return nil
+			}
+		}
+		m.say("no sessions need attention")
+		return nil
+	}
+
+	position := 0
+	if delta > 0 {
+		for i, index := range indices {
+			if index > m.cursor {
+				position = i
+				break
+			}
+		}
+	} else {
+		position = len(indices) - 1
+		for i := len(indices) - 1; i >= 0; i-- {
+			if indices[i] < m.cursor {
+				position = i
+				break
+			}
+		}
+	}
+
+	m.unmountEmbedded()
+	m.cursor = indices[position]
+	s := m.view[m.cursor]
+	m.say("attention " + format.Itoa(position+1) + " of " + format.Itoa(len(indices)) + " · " + s.Name())
+	return m.capture()
 }
 
 func (m *Model) rebuild() {
@@ -908,6 +986,46 @@ func (m *Model) anyWorking() bool {
 func (m *Model) say(s string) {
 	m.status = s
 	m.statusUntil = time.Now().Add(6 * time.Second)
+	m.statusSticky = errorStatus(s)
+	if m.statusSticky {
+		m.lastError, m.lastErrorAt = s, time.Now()
+	}
+}
+
+func errorStatus(s string) bool {
+	s = strings.ToLower(s)
+	for _, marker := range []string{
+		"failed", "error", "could not", "not installed", "unavailable",
+		"stopped responding", "unknown agent", "directory \"", "not a directory",
+		"choose a directory", "only ~", "preview:", "live pane:",
+		"session is running in tmux", "copilot can only be dispatched",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) diagnosticsCmd() tea.Cmd {
+	return func() tea.Msg {
+		tmuxStatus := "not installed"
+		if tmux.Available() {
+			tmuxStatus = tmux.Version()
+			if tmuxStatus == "" {
+				tmuxStatus = "installed (version unknown)"
+			}
+		}
+		var agents []string
+		for _, ag := range session.AllAgents {
+			state := "missing"
+			if ag.Installed() {
+				state = "installed"
+			}
+			agents = append(agents, ag.String()+": "+state)
+		}
+		return diagnosticsMsg{captured: time.Now(), tmux: tmuxStatus, agents: agents}
+	}
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -923,6 +1041,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 		return m, tea.Batch(cmds...)
+
+	case diagnosticsMsg:
+		m.diagnostics = diagnosticSnapshot(msg)
+		return m, nil
 
 	case sendLogosMsg:
 		// Kitty virtual placements belong to the screen they were created on.
@@ -970,6 +1092,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen != m.scanGen {
 			return m, nil
 		}
+		m.lastScan, m.lastScanCount = time.Now(), len(msg.sessions)
 		if m.preparing != nil {
 			// Startup is one visual transaction. Applying a scan here would
 			// reorder the selected row and change header counts as soon as tmux
@@ -1207,7 +1330,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text:   "\x1b[200~" + msg.Content + "\x1b[201~",
 			})
 		}
-		if m.dispatching {
+		if m.dispatching || m.newing {
 			return m, m.updateDispatchInput(msg)
 		}
 		if m.filtering {
@@ -1267,6 +1390,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dispatching {
 			return m, m.dispatchKey(msg)
 		}
+		if m.newing {
+			return m, m.newSessionKey(msg)
+		}
 		if m.filtering {
 			switch msg.String() {
 			case "esc":
@@ -1309,10 +1435,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.killConfirm != nil {
+		switch msg.String() {
+		case "enter", "x", "y":
+			return m, m.confirmKill()
+		case "esc", "n", "q":
+			m.killConfirm = nil
+			m.say("kill cancelled")
+		case "ctrl+c":
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	if m.showHelp {
 		switch msg.String() {
 		case "?", "esc":
 			m.showHelp = false
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	if m.diagnosticsOpen {
+		switch msg.String() {
+		case "D", "esc":
+			m.diagnosticsOpen = false
+		case "r":
+			return m, tea.Batch(m.diagnosticsCmd(), m.refreshCmd())
+		case "c":
+			m.status, m.lastError = "", ""
+			m.statusSticky = false
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		}
@@ -1345,9 +1497,16 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.cursor = max(0, len(m.view)-1)
 		return m, m.capture()
+	case "]":
+		return m, m.moveAttention(1)
+	case "[":
+		return m, m.moveAttention(-1)
 	case "?":
 		m.showHelp = true
 		return m, nil
+	case "D":
+		m.diagnosticsOpen = true
+		return m, m.diagnosticsCmd()
 	case "/":
 		m.unmountEmbedded()
 		m.resetPrompt()
@@ -1392,6 +1551,8 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.query, m.matches = "", nil
 			m.rebuild()
 			m.say("search cleared")
+		} else if m.statusSticky {
+			m.status, m.statusSticky = "", false
 		}
 		return m, nil
 	case "a":
@@ -1417,30 +1578,12 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		return m, m.enterEmbedded()
 	case "x":
-		return m, m.kill()
+		return m, m.requestKill()
 	case "n":
-		s := m.sel()
-		if s == nil {
-			return m, nil
-		}
-		return m, m.spawn(s.Agent, s.Cwd)
+		m.beginComposer(true)
+		return m, textinput.Blink
 	case "d":
-		ag, cwd := m.dispatchTarget()
-		m.dispatchTo, m.dispatchInto = ag, cwd
-		m.dispatching, m.filtering = true, true
-		m.dispatchDirFocused = false
-		m.dispatchDirCursor = -1
-		m.status = ""
-		m.filter.Prompt = "› "
-		m.filter.Placeholder = "@codex can you check feature X?"
-		// Long enough for a real brief. The quick filter's 80 is a sensible
-		// cap on a substring match and an absurd one on a task description.
-		m.filter.CharLimit = 4000
-		m.filter.SetValue("")
-		m.filter.Focus()
-		m.dispatchDir.Prompt = "› "
-		m.dispatchDir.SetValue(cwd)
-		m.dispatchDir.Blur()
+		m.beginComposer(false)
 		return m, textinput.Blink
 	}
 	return m, nil
@@ -1568,17 +1711,30 @@ func (m *Model) attach(name, cwd string, focus focusTarget, mode attachMode) tea
 	}
 }
 
-func (m *Model) kill() tea.Cmd {
+func (m *Model) requestKill() tea.Cmd {
+	if m.preparing != nil {
+		return func() tea.Msg { return statusMsg("wait for the live pane preparation to finish") }
+	}
 	s := m.sel()
 	if s == nil || s.Tmux == nil {
 		return func() tea.Msg { return statusMsg("nothing running for that session") }
 	}
-	name := s.Tmux.Name
+	m.killConfirm = &killConfirmation{tmux: s.Tmux.Name, title: s.Name(), cwd: s.Cwd}
+	return nil
+}
+
+func (m *Model) confirmKill() tea.Cmd {
+	prompt := m.killConfirm
+	m.killConfirm = nil
+	if prompt == nil {
+		return nil
+	}
+	m.say("killing " + prompt.title + "…")
 	return func() tea.Msg {
-		if err := tmux.Kill(name); err != nil {
+		if err := tmux.Kill(prompt.tmux); err != nil {
 			return statusMsg("kill failed: " + err.Error())
 		}
-		return statusMsg("killed " + name)
+		return statusMsg("killed " + prompt.title)
 	}
 }
 

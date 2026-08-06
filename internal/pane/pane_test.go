@@ -151,6 +151,9 @@ func TestHistoryViewportAndFollowTail(t *testing.T) {
 	if !p.Scrolled() {
 		t.Fatal("history viewport did not report its scrollback state")
 	}
+	if got := p.ScrollOffset(); got != 3 {
+		t.Errorf("ScrollOffset = %d, want 3", got)
+	}
 
 	p.FollowTail()
 	if p.Scrolled() || !strings.Contains(p.Render(), "live tail") {

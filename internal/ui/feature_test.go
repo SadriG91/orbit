@@ -258,7 +258,13 @@ func (f *fakePane) SendWheelTo(_ string, x, y int, direction pane.WheelDirection
 	f.wheels = append(f.wheels, fakeWheel{x: x, y: y, direction: direction})
 	return nil
 }
-func (f *fakePane) Scrolled() bool         { return f.scrolled }
+func (f *fakePane) Scrolled() bool { return f.scrolled }
+func (f *fakePane) ScrollOffset() int {
+	if f.scrolled {
+		return 3
+	}
+	return 0
+}
 func (f *fakePane) FollowTail()            { f.scrolled = false }
 func (f *fakePane) Dirty() <-chan struct{} { return f.dirty }
 func (f *fakePane) Done() <-chan struct{}  { return f.done }

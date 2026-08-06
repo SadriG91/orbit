@@ -1,45 +1,32 @@
 # orbit
 
-A dashboard for the coding-agent sessions running on your machine — Claude Code,
-Codex and GitHub Copilot CLI, across every project. Meant to live in its own
-terminal tab.
+A terminal dashboard for Claude Code, Codex, and GitHub Copilot CLI sessions
+across all your projects.
 
-It answers the question you can't answer by staring at a wall of tabs: **which
-session is blocked on me right now?** Sessions run inside tmux, so closing a tab
-never kills work.
+Orbit shows which agents are working, finished, or waiting for you. Sessions
+run inside tmux, so closing Orbit or a terminal tab does not stop them.
 
-```
+```text
  ██████╗ ██████╗ ██████╗ ██╗████████╗
 ██╔═══██╗██╔══██╗██╔══██╗██║╚══██╔══╝
 ██║   ██║██████╔╝██████╔╝██║   ██║
 ██║   ██║██╔══██╗██╔══██╗██║   ██║      ▲ needs attention 1 · ● working 2
-╚██████╔╝██║  ██║██████╔╝██║   ██║     18 of 77 sessions · claude · codex · copilot
+╚██████╔╝██║  ██║██████╔╝██║   ██║     18 of 77 sessions shown
  ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═╝   ╚═╝
-╭─ SESSIONS · RECENT ────────────────────────────╮ ╭─ LIVE · WORK/API-GATEWAY ──────────────────╮
-│ ▌ ▲ cl work/api-gateway                     2m │ │ Refactor batch runner                      │
-│ ▌   Refactor batch runner       needs attention │ │ ~/work/api-gateway                         │
-│   ⠸ cx src/widgets                         40m │ │ claude · main · 46 msgs · 2m ago ▲ attention│
-│     Evaluate the docs of this repo     working │ │                                            │
-│   ◆ cl services/billing                     1h │ │ ▸ last prompt                              │
-│     Add retry to the webhook queue     finished │ │   now run the tests                        │
-│   · cp work/docs-site                       3d │ │                                            │
-│     Integrate Copilot in Actions               │ │ ▸ live output                              │
-│                                                │ │   ● Bash(go test ./...)                    │
-│                                                │ │     Do you want to proceed?                │
-╰────────────────────────────────────────────────╯ ╰────────────────────────────────────────────╯
-  ⏎  attach   tab  drive   n  new   d  dispatch   /  filter   ?  shortcuts
+╭─ ▶ SESSIONS · RECENT ────────────────────────╮ ╭─ PREVIEW · WORK/API ────────────────────╮
+│ ▌ ▲ cl work/api                           2m │ │ Refactor batch runner                   │
+│ ▌   Refactor batch runner    needs attention │ │ ~/work/api                              │
+│   ⠸ cx src/widgets                      40m │ │ claude · main · 46 msgs · 2m ago       │
+│     Evaluate the docs              working │ │                                         │
+│   ◆ cl services/billing                  1h │ │ ▸ last prompt                           │
+│     Add retry to webhook queue     finished │ │   now run the tests                     │
+╰─────────────────────────────────────────────╯ ╰─────────────────────────────────────────╯
+  ⏎ attach   tab drive   n new   d dispatch   / filter   ? shortcuts
 ```
-
-## Why
-
-Agent CLIs each ship a `--resume` picker, but every one of them only sees the
-directory you're standing in. If you run several agents across several repos,
-nothing tells you where they all are, which are still alive, or which one has
-been sitting on a permission prompt for ten minutes. orbit is that missing view.
 
 ## Install
 
-macOS, via Homebrew — a prebuilt binary, nothing to compile:
+macOS with Homebrew:
 
 ```sh
 brew install sadrig91/tap/orbit
@@ -51,411 +38,173 @@ Linux, or without Homebrew:
 go install github.com/sadrig91/orbit/cmd/orbit@latest
 ```
 
-Or download a binary for your platform from
-[Releases](https://github.com/SadriG91/orbit/releases).
+Prebuilt binaries are also available from
+[GitHub Releases](https://github.com/SadriG91/orbit/releases).
 
-tmux 3.4 or newer is required either way — that's what Ubuntu 24.04 LTS ships,
-and orbit checks on start rather than misbehaving later.
-[Ghostty](https://ghostty.org) (1.3+ for the best experience) or iTerm2 is
-optional but gets you tab spawning and desktop notifications.
+Orbit requires tmux 3.4 or newer. Ghostty 1.3+ or iTerm2 is optional and adds
+native tab opening and desktop notifications.
 
-### Staying current
+Run it from any directory:
 
-orbit checks GitHub for a newer release when it starts — at most once a day,
-cached in `~/.cache/orbit/update.json` — and installs it the same way this
-copy was installed: `brew upgrade` for a Homebrew install, `go install` for a
-go-installed one, and a checksum-verified binary swap otherwise. The status
-line says what it's doing, and orbit restarts itself once the new version is
-in place and has confirmed its own version.
+```sh
+orbit
+```
 
-Turn it off in `~/.config/orbit/config.toml`:
+Orbit checks for updates at most once a day. Disable this in
+`~/.config/orbit/config.toml`:
 
 ```toml
 [update]
 auto = false
 ```
 
-or per run with `--no-update` / `ORBIT_NO_UPDATE=1`.
+You can also use `orbit --no-update` or `ORBIT_NO_UPDATE=1` for one run.
 
-The Go tests cover the pieces; the last step — orbit exec'ing the new build
-over itself — needs a real terminal, so it has a script instead:
+## Using Orbit
 
-```sh
-./scripts/check-self-update.sh
-```
+The left pane lists sessions. The right pane shows details or a live terminal.
+The `▶` marker shows which pane owns keyboard input.
 
-It builds a deliberately stale orbit in a scratch directory with its own
-`HOME`, drives it under a pty, and checks that it announces the update,
-replaces its own binary, and survives the restart with the same pid. Your
-install, config and update cache are not touched, and it never runs brew.
+- Press `Enter` to resume or attach to the selected session.
+- Press `Tab` to drive the selected agent inside Orbit. If it is dormant,
+  Orbit resumes it first.
+- Press `Tab` or `Ctrl+G` to return from the live terminal to the session list.
+- Press `[` or `]` to jump directly between sessions needing attention.
+- Press `?` at any time for the complete shortcut reference.
 
-### Releasing
+When a live terminal is focused, `Ctrl+F` toggles full screen and `Ctrl+E`
+widens the pane. Mouse-wheel scrollback shows how many lines you are above the
+live output.
 
-Pushing a `v*` tag is the whole process: CI cross-compiles for macOS and Linux
-on both architectures, publishes the archives and checksums with generated
-notes, and updates the Homebrew cask in
-[SadriG91/homebrew-tap](https://github.com/SadriG91/homebrew-tap). It needs a
-`HOMEBREW_TAP_TOKEN` secret, because the release runs in this repo and
-`GITHUB_TOKEN` cannot write to a different one.
+### Keys
 
-## Keys
+| Key | Action |
+|---|---|
+| `Enter` | Attach or resume the selected session |
+| `Tab` | Switch between the session list and live terminal |
+| `[` / `]` | Previous / next session needing attention |
+| `j` / `k`, arrows | Move through sessions |
+| `g` / `G` | First / last session |
+| `/` | Filter titles, paths, branches, and agents |
+| `f` | Search inside transcripts |
+| `Esc` | Clear search or dismiss a persistent error |
+| `o` / `p` | Cycle sorting / grouping |
+| `a` | Toggle recent and all sessions |
+| `n` | Compose a new interactive session |
+| `d` | Compose a headless task dispatch |
+| `s` / `S` | Summarise one / all visible sessions |
+| `x` | Confirm and kill the selected tmux session |
+| `r` | Refresh |
+| `D` | Open diagnostics |
+| `?` | Open shortcut help |
+| `q` | Quit; running sessions continue |
 
-| key     | action                                                    |
-|---------|-----------------------------------------------------------|
-| `⏎`     | attach — resumes the session first if it isn't running     |
-| `tab`   | switch focus between sessions and the selected live pane   |
-| `ctrl+f`| toggle the focused live pane full screen                    |
-| `ctrl+e`| toggle a wider live pane while keeping sessions visible     |
-| `i`     | attach in this terminal; returns to orbit when you detach  |
-| `t`     | attach in a new Ghostty tab                                |
-| `w`     | attach in a new Ghostty window                             |
-| `s`     | summarise this session with a cheap model, then cache it   |
-| `S`     | queue every visible session that has no summary yet        |
-| `f`     | full-text search inside transcripts                        |
-| `o`     | cycle sort: age / tokens / project / agent                 |
-| `p`     | cycle grouping: off / project folder / agent                |
-| `n`     | new session, same agent and dir, opened inside orbit        |
-| `d`     | dispatch a task to an agent headlessly, in that dir        |
-| `x`     | kill the tmux session (the transcript is untouched)        |
-| `/`     | filter by title, path, branch or agent                     |
-| `a`     | show everything (default hides untitled + older than 30d)  |
-| `r`     | refresh now                                                |
-| `?`     | open the keyboard shortcut helper                          |
-| `q`     | quit the dashboard — running sessions carry on             |
+Attach overrides are also available: `i` attaches in the current terminal,
+`t` opens a tab, and `w` opens a window. Orbit reuses an existing tab when it
+can find one instead of opening a duplicate.
 
-`⏎` picks the best available: a Ghostty or iTerm2 tab on macOS, otherwise
-in-place. If the session is already showing in a tab, `⏎`, `t` and `w` switch
-to that tab instead of opening a second one; if its tab can't be found any
-more, a new one opens as before.
+### Session state
 
-`n` starts a normal interactive agent in tmux and keeps orbit on screen. Its
-live pane gets focus immediately. `tab` switches focus between the session list
-and that pane without replacing the terminal with a text preview. The terminal
-stays muted while its row remains selected. Moving through the list replaces it
-with the newly selected session's preview; pressing `tab` focuses that session.
-When the selected transcript is dormant, `tab` first resumes it in tmux and
-focuses it as soon as it is ready. The row and detail pane show one preparation
-state while Orbit
-waits for the agent—not just the shell or tmux pane—to be ready. The resume
-command and shell startup stay hidden; the row and terminal become live
-together. Once the pane is focused, normal keys—including `Shift+Tab`—go to
-the agent. `ctrl+f` toggles
-full screen, `ctrl+e` gives the pane more width without hiding the session list,
-the mouse wheel scrolls the agent when it is over the live pane, and `ctrl+g`
-is a second way back to sessions. Orbit keeps wheel reporting enabled so it
-cannot turn into accidental arrow-key navigation after returning to the session
-list, but only routes wheel events while the live pane has focus. The tmux
-session keeps running in the background, and `⏎` still
-attaches it to a full terminal whenever that is more comfortable.
+| Mark | Meaning |
+|---|---|
+| `▲` | Needs attention, such as a permission prompt |
+| `◆` | Finished its last response |
+| `●` | Working |
+| `○` | tmux is alive, but the agent exited |
+| `·` | Not running; attach to resume it |
 
-`/` filters titles and paths as you type; `f` searches message bodies and runs
-on Enter. `esc` clears a search. Press `?` for the full shortcut list without
-leaving the dashboard; `?` or `esc` closes it. `p` groups the Sessions pane
-into contiguous project-folder or agent sections, with a count in each heading.
-Grouping keeps the current `o` sort: the first session surfaced by that sort
-positions its group, and the same ordering is preserved inside the section.
+## New sessions and dispatch
 
-## Search and summaries
+Press `n` to start an interactive agent. The composer lets you choose the
+agent and directory, and works even when the dashboard is empty. Use
+Left/Right to select an agent, `Tab` to move to the directory, and Up/Down to
+choose a recent project.
 
-Titles are terse — "Check branch status against main" doesn't say which branch —
-so `f` searches the transcript bodies themselves and shows the matching text in
-the detail pane. Nothing is held in memory; the files are scanned on demand,
-which across ~80 sessions takes under 200ms.
+Press `d` to run a task headlessly. Its composer keeps the session list visible
+and makes the task, agent, and directory explicit:
 
-`s` summarises a session in two or three sentences and caches the result.
+- `Tab` or `Shift+Tab` moves between fields.
+- Left/Right changes the agent.
+- Up/Down selects a recent project directory.
+- A leading `@claude`, `@codex`, or `@copilot` overrides the selected agent.
 
-A summary records how much of the conversation it covers. When you continue a
-session it goes **stale rather than invalid**: the detail pane says how many
-messages it hasn't seen, and the next regeneration sends the existing summary
-plus only the new messages. Input stays roughly constant no matter how long a
-conversation runs, instead of re-reading the whole transcript every turn — which
-on an active session would bill a full summarisation per prompt.
-
-Rolling summaries compound their own omissions, so after five incremental
-updates the next one rebuilds from the transcript. An update is also skipped in
-favour of a rebuild when the unseen part is most of the conversation, where
-building on the old text buys nothing.
-
-Automatic regeneration (`auto = true`) is the only thing that spends money
-without being asked, so it is guarded: it waits until a session is
-`auto_min_new_messages` behind (default 8) and never fires while a turn is in
-flight, since the transcript is still being written.
-
-Summaries run through each provider's **own CLI** in non-interactive mode
-(`claude -p`, `codex exec`, `copilot -p`), so the work is billed to that agent's
-existing subscription and orbit needs no API keys. The command is configurable
-per provider — point it at the cheapest model each one offers, since this is a
-summarising job rather than a reasoning one:
-
-orbit owns these commands and updates them with each release, so they are not
-written into your config. They depend on things that move underneath us: which
-flag stops a CLI recording a session of its own, which models a provider will
-accept, which subcommand the installed version has. A copy frozen into your
-file on install day goes wrong quietly — a default that turned out to be
-rejected by every ChatGPT-account login stayed that way, unfixable, because
-orbit couldn't tell it from a value you'd chosen.
-
-Write one yourself to take it over, and orbit leaves it alone for good:
-
-```toml
-[summary.codex]
-command = ["codex", "exec", "--ephemeral", "--model", "something-cheaper"]
-```
-
-Keep the flag that stops the CLI recording a session if you do —
-`--no-session-persistence` for claude, `--ephemeral` for codex — or every
-summary leaves a conversation of orbit's own on disk, resumable and counted in
-the token sort. Copilot has no equivalent, so orbit runs all three in
-`~/.cache/orbit/scratch` and hides sessions found there.
-
-A command orbit itself wrote into an older config is retired on the next start,
-with a note saying so. One you wrote is never touched.
-
-Generation takes around ten seconds and runs in the background. The bar in the
-header is global and measures *coverage* — how many of the sessions on screen
-have a summary — so it advances only when one finishes, never on time elapsed.
-`S` queues everything still missing one, two at a time, since each job is a
-whole agent process and running more in parallel just makes each slower.
-Ghostty also gets a native progress indicator on the tab while work is in hand.
-
-Because summarising deliberately uses cheap models, and cheap models have the
-smallest context windows, only a thin slice of the transcript is sent: the
-opening of the conversation plus its tail, skipping the bulky tool output in
-the middle. `max_input_chars` caps it (12000 ≈ 3k tokens), overridable per
-provider if you point one at a bigger model.
-
-Set `auto = true` under `[summary]` to summarise whatever you're sitting on
-without pressing `s`. It's off by default because it spends tokens as you browse.
-
-## State
-
-| icon | meaning                                                       |
-|------|---------------------------------------------------------------|
-| `▲`  | needs attention — a permission prompt, or a dispatch that stopped |
-| `◆`  | finished — the agent completed its last response               |
-| `●`  | working                                                        |
-| `○`  | tmux session alive, but the agent has exited (just a shell)    |
-| `·`  | not running — `⏎` resumes it                                   |
-
-Each row also carries the session's token usage, read from whatever the agent
-recorded — Claude's per-message `usage`, Codex's `total_token_usage`, Copilot's
-`assistant_usage_events` table. `o` sorts by it.
-
-State comes from the agent itself where possible. Sessions orbit starts carry
-a hook — injected per invocation, nothing written into your config — that
-reports each change as it happens, so a permission prompt shows as ▲ the
-second it is drawn rather than after a heuristic delay. Claude sessions have
-this today; codex and copilot are on the older path.
-
-Dispatched sessions (`d`) don't infer anything at all: orbit started the
-process and is reading the CLI's own event stream, so "working" means an event
-said so.
-
-Everything else falls back to joining the transcript with live tmux facts: an
-unanswered tool call that stops advancing reads as a permission prompt. That
-guess is right for prompts and wrong for slow tools, which is exactly why the
-hooks exist. Copilot keeps a database rather than an event stream, so its
-fallback states are coarser still — though only in the dashboard's usual mode:
-its *non-interactive* CLI has the richest event stream of the three, which is
-what dispatch uses.
-
-## Dispatch
-
-`d` opens a dispatch composer in the dashboard's right pane, keeping the
-Sessions list visible. The selected session supplies the initial agent and
-directory, but neither is binding: edit the directory with `Tab`, use Up/Down
-to choose from known project directories (or type any path), and begin the task
-with `@claude`, `@codex`, or `@copilot` to choose the agent explicitly. For example:
+For example:
 
 ```text
 @codex can you check feature X?
 ```
 
-With no mention, orbit uses the default shown in the composer. Relative
-directories are resolved from the directory where orbit was started, and `~`
-is supported. The run appears in the list like any other session — working,
-then waiting for you.
+A dispatch appears in the normal session list and survives quitting Orbit.
+Attach to take it over interactively, or press `x` to stop its tmux session.
 
-A dispatch is not a separate kind of session. All three CLIs write to their
-ordinary stores in non-interactive mode, so `⏎` on a finished dispatch resumes
-it in the interactive TUI with the whole conversation in front of you, and
-carries on appending to the same transcript. Dispatch starts work; taking it
-over is the same key as everything else.
-
-The runner is orbit itself, in a tmux session on orbit's private server, which
-is why it behaves like the rest of the dashboard: it survives quitting orbit,
-`x` kills it, and sitting on the row shows the live output. When the run ends
-the pane goes with it, leaving a session to resume. The narration is also kept
-in `~/.cache/orbit/dispatch/<id>.log`.
-
-**Approvals stop the run rather than guessing.** Claude is the only one of the
-three that can ask for permission non-interactively, and it asks orbit rather
-than you. Orbit always answers the same way: it interrupts the turn and marks
-the session ▲ needs attention, with the exact command it wanted to run in the
-detail pane. `⏎` then resumes it where it stopped. Nothing is approved on your
-behalf, and nothing is silently refused — which is what the alternative would
-have been, since a dispatched claude that cannot ask simply gets its tool denied
-and talks its way around it.
-
-Codex and copilot have no approval channel in this mode at all, so a dispatch
-to either runs to the end under whatever their own settings permit. Copilot
-goes further: its CLI requires `--allow-all-tools` to run non-interactively, so
-orbit will not dispatch one until you have said so in config.
+Claude dispatches stop and show `▲` when a tool needs approval; Orbit does not
+approve it for you. Codex and Copilot do not expose an approval channel in
+their non-interactive modes. Copilot additionally requires explicit opt-in:
 
 ```toml
 [dispatch]
-timeout = "30m"                  # how long a run may take before orbit stops it
-claude_permission_mode = ""      # empty: obey the same settings your claude does
-copilot_allow_all_tools = false  # required before a copilot dispatch will start
+timeout = "30m"
+copilot_allow_all_tools = false
 ```
 
-Set `claude_permission_mode = "manual"` if you would rather be asked about
-everything an unattended run does. There is no cost to being stopped often —
-taking a session over resumes it exactly where it left off.
+## Search and summaries
 
-## How it works
+`/` filters visible metadata as you type. `f` searches transcript contents
+after you press Enter. `Esc` clears either search.
 
-**Sessions** are read from each agent's own store, in parallel, cached on mtime
-so a refresh is normally just `stat()` calls:
+`s` creates a short cached summary of the selected session. `S` queues all
+visible sessions without summaries. Orbit uses each provider's installed CLI,
+so no separate API key is needed. Automatic summaries are off by default
+because they spend tokens while you browse:
 
-| agent | store | resume |
-|-------|-------|--------|
-| Claude Code | `~/.claude/projects/*/*.jsonl` | `claude --resume <id>` |
-| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | `codex resume <id>` |
-| Copilot CLI | `~/.copilot/session-store.db` (sqlite3) | `copilot --resume=<id>` |
-
-Claude's per-project directory name is lossy — `/` and `.` both become `-` — so
-the working directory is read out of the records rather than decoded from the
-path. Older Codex rollouts key the session as `id` rather than `session_id`, and
-fall back to the uuid in the filename.
-
-**Dispatch** (`d`) drives each CLI's non-interactive mode and reads its JSONL
-event stream. The flags were arrived at by running them, not from the docs:
-
-| agent | how orbit runs it | approval |
-|-------|-------------------|----------|
-| Claude Code | `-p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio --session-id <uuid>` | `control_request{can_use_tool}`, answered with deny + interrupt |
-| Codex | `exec --json --skip-git-repo-check -C <dir>` | none exists in `exec` mode |
-| Copilot CLI | `-p --output-format json --session-id <uuid> --allow-all-tools` | none exists; the flag is mandatory |
-
-`--permission-prompt-tool stdio` is what makes the approval visible at all —
-without it the CLI auto-denies the tool and the model works around the refusal.
-Claude and copilot accept a session id, so orbit picks one before the process
-starts and the run is joined to a session from its first tick; codex only
-reveals its `thread_id` on the first event, and orbit records it then. No
-sandbox or approval policy is imposed on codex, and no permission mode on
-claude by default: your own config decides, so a handoff means "your agent
-would have prompted here".
-
-**tmux** runs on a private server (`tmux -L orbit`) with its own config at
-`~/.config/orbit/tmux.conf`, installed from a copy embedded in the binary. It
-never touches a normal `tmux`. The status bar is off and the prefix is moved to
-`C-o` so it can't steal `C-b` from an agent's input line. Agents are launched by
-typing into an interactive login shell rather than via `new-session <cmd>`,
-because agents are often shell functions or version-manager shims that don't
-exist in a bare `sh -c`.
-
-Session state is read back with one `list-sessions -F`, and tmux is fussier
-about that than it looks. Older versions (3.4, which Debian and Ubuntu 24.04
-ship) escape control characters in command output, so the `\x1f` field
-separator arrives as the literal `\037` — the parser takes either. Every
-invocation also passes `-u`, without which tmux replaces multi-byte characters
-with `_` for any client whose locale it doesn't like, mangling the `·` in tab
-titles and leaving orbit re-titling every session on every tick because the
-title it wrote never matches the one it reads.
-
-**Tab titles** are pushed as `<short pwd> · <session title>` through tmux's
-`set-titles`, configured to ignore `pane_title` so agents can't overwrite them.
-
-**New tabs** are opened through Ghostty's AppleScript dictionary (Ghostty
-1.3+), which hands back a stable tab id. orbit stores that id on the tmux
-session (`@orbit_tab`), so opening a session that's already on screen switches
-to its tab instead of stacking up another — matching id and current title,
-since Ghostty reuses ids after a close and titles can collide. The same works
-in iTerm2 via its own dictionary. On older Ghostty, orbit falls back to
-sending `cmd+T` via System Events and typing the attach command, which needs
-Accessibility permission and can only find tabs again by title. Without any
-of that, use `i`.
-
-**Notifications** use OSC 9 when a session needs attention or finishes a turn.
-
-## Layout
-
-```
-cmd/orbit/          entry point: flags, wiring, --list/--json output
-internal/
-  config/           config.toml and its defaults
-  format/           shared string and time helpers
-  session/          the session model: agents, parsers, index, sorting
-  tmux/             the private tmux server; knows nothing about agents
-  term/             Ghostty and iTerm2: opening tabs, focusing them back
-  search/           full-text search over transcript bodies
-  hooks/            agent hook events -> per-session state; `orbit hook`
-  summary/          cached, incrementally-updated summaries
-  update/           the once-a-day release check and self-update
-scripts/            checks that need a real terminal, not a test runner
-  ui/               Bubble Tea model, rendering, logos, notifications
-test/               integration tests that touch the real system
+```toml
+[summary]
+auto = true
+auto_min_new_messages = 8
+max_input_chars = 12000
 ```
 
-Dependencies run one way: `format` and `config` sit at the bottom and import
-nothing local, `tmux` is deliberately ignorant of agents (it deals in names and
-strings), `session` is the domain model, and `ui` composes the lot. Anything
-needing both an agent and tmux — resuming a session, starting a new one — lives
-in `ui`, which is the only layer entitled to know about both.
+Provider commands can be overridden when you want a different model:
 
-Unit tests sit beside the code they cover, as Go expects, so they can reach
-unexported internals. `test/` is for integration tests that spawn a real tmux
-server or read the actual session stores.
-
-## Caveats
-
-- tmux owns the scrollback, so your terminal's find-in-page only searches the
-  visible pane inside a session. Use tmux copy-mode (`C-o [`).
-- Closing a session tab detaches; it does not kill. Sessions accumulate until
-  you `x` them.
-- Reading only. orbit will not answer prompts on your behalf.
-
-## Config
-
-`~/.config/orbit/config.toml` is written with annotated defaults on first run:
-icons, attach behaviour, notifications, `recent_days`, sort order, grouping
-and its `group_by` mode, spawn delays, dispatch, updates and the per-provider
-summary commands. Environment variables (`ORBIT_ICONS`, `ORBIT_SPAWN_DELAY`,
-`ORBIT_TAB_DELAY`) still win over the file, so a single run can be changed
-without editing it.
-
-Settings orbit gains later are appended to the file on the next start, with
-the comments that explain them, and orbit says which ones it added. It only
-ever adds: a key already in the file is left alone even when the shipped
-default has since changed, because at that point the value is a decision and
-nothing can tell a deliberate one from a leftover. So a new setting shows up
-where you'd look for it, and nothing you've edited is rewritten, reordered or
-reformatted.
-
-### Agent logos
-
-Sessions are tagged with the actual Claude, OpenAI and Copilot marks, drawn as
-images via the Kitty graphics protocol — supported by Ghostty and Kitty. Any
-other terminal gets the `cl` / `cx` / `cp` text tags instead: the default is
-`icons = "auto"`, which detects the capability rather than assuming it. Set
-`icons = "text"` (or `ORBIT_ICONS=text`) to pin it to the tags. Check what
-yours does:
-
-```sh
-orbit --probe-logos
+```toml
+[summary.codex]
+command = ["codex", "exec", "--ephemeral", "--model", "your-model"]
 ```
 
-The marks are transmitted once at startup and placed with Unicode placeholders,
-so they flow with the text rather than being pinned to screen coordinates, and
-occupy exactly the two columns the text tag did. tmux doesn't pass placeholders
-through, so logos switch themselves off if orbit is running inside one.
+## Configuration and accessibility
 
-Artwork is from [Simple Icons](https://simpleicons.org) (CC0), recoloured for a
-dark terminal. Trademarks belong to their respective owners; the marks identify
-which agent owns a session and imply no affiliation or endorsement.
+Orbit creates an annotated config at `~/.config/orbit/config.toml`. It covers
+attach behavior, notifications, recent-session limits, sort and grouping,
+dispatch, updates, summaries, and agent icons. Existing settings are preserved
+when new defaults are added.
 
-Flags: `--inline`, `--window`, `--no-notify`, `--list`, `--json`, `--probe-logos`, `--version`.
+Useful environment settings:
+
+| Variable | Effect |
+|---|---|
+| `NO_COLOR=1` | Remove ANSI styling and use text agent tags |
+| `ORBIT_REDUCED_MOTION=1` | Replace animated indicators with a static dot |
+| `ORBIT_ICONS=text` | Always use `cl`, `cx`, and `cp` tags |
+| `ORBIT_NO_UPDATE=1` | Disable the update check for this run |
+
+Ghostty and Kitty can display agent logos through the Kitty graphics protocol.
+Other terminals automatically use text tags. Run `orbit --probe-logos` to
+check support.
+
+Errors stay visible until `Esc` dismisses them. Press `D` for diagnostics about
+the latest scan, preview mode, tmux and agent availability, stack-dump path,
+and most recent error. Inside diagnostics, `r` refreshes and `c` clears the
+recorded error.
+
+## Notes
+
+- Orbit uses a private tmux server and does not change your normal tmux setup.
+- Closing a tab detaches; it does not kill the session. Use `x` when you intend
+  to stop one. The transcript and cached summary remain available.
+- tmux owns live-pane scrollback. Use its copy mode (`Ctrl+O`, then `[`) for
+  selection and search.
+- Flags: `--inline`, `--window`, `--no-notify`, `--list`, `--json`,
+  `--probe-logos`, `--no-update`, and `--version`.
 
 ## License
 

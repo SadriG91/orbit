@@ -77,7 +77,7 @@ func banner(width, height int) []string {
 	switch {
 	case height >= 32 && width >= 74:
 		art = bannerFull
-	case height >= 22 && width >= 46:
+	case height >= 28 && width >= 46:
 		art = bannerSmall
 	default:
 		return []string{sTitle.Render("orbit")}
@@ -105,6 +105,16 @@ func (m *Model) render() string {
 		body := titledPane("keyboard shortcuts · ? or esc to close", m.shortcutHelp(m.w-4, bodyH-3), m.w, bodyH)
 		return head + "\n" + body + "\n" + foot
 	}
+	if m.diagnosticsOpen {
+		bodyH := max(5, m.h-lipgloss.Height(head)-lipgloss.Height(foot))
+		body := titledPane("diagnostics · D or esc to close", m.diagnosticLines(m.w-4, bodyH-3), m.w, bodyH)
+		return head + "\n" + body + "\n" + foot
+	}
+	if m.killConfirm != nil {
+		bodyH := max(5, m.h-lipgloss.Height(head)-lipgloss.Height(foot))
+		body := titledPane("confirm kill · input locked", m.killConfirmationLines(m.w-4, bodyH-3), m.w, bodyH)
+		return head + "\n" + body + "\n" + foot
+	}
 	listBoxW, detBoxW, bodyH := m.dashboardPaneSizes()
 	const chrome = 4
 
@@ -116,25 +126,26 @@ func (m *Model) render() string {
 	if m.group != groupNone {
 		label += " · grouped by " + m.group.String()
 	}
-	if m.terminalFocused && m.embedded != "" && m.preparing == nil {
-		label += " · unfocused"
-	}
 	if m.query != "" {
 		label = "search · " + m.query
 		if m.group != groupNone {
 			label += " · grouped by " + m.group.String()
 		}
 	}
+	label = focusPaneLabel(label, !m.terminalFocused && !m.dispatching && !m.newing && m.preparing == nil)
 	body := titledPane(label, m.list(listBoxW-chrome, bodyH-3), listBoxW, bodyH)
 
 	if detBoxW > 0 {
 		label := "detail"
 		var right []string
 		if m.dispatching {
-			label = "dispatch task"
+			label = focusPaneLabel("dispatch task", true)
 			right = m.dispatchLines(detBoxW-chrome, bodyH-3)
+		} else if m.newing {
+			label = focusPaneLabel("new session", true)
+			right = m.newSessionLines(detBoxW-chrome, bodyH-3)
 		} else if m.preparing != nil {
-			label = "preparing live pane · " + shortDir(m.preparing.cwd)
+			label = "… preparing live pane · " + shortDir(m.preparing.cwd)
 			right = m.preparingLines(detBoxW-chrome, bodyH-3)
 		} else if m.embedded != "" {
 			mode := "unfocused"
@@ -142,9 +153,9 @@ func (m *Model) render() string {
 				mode = "focused"
 			}
 			if m.stream != nil && m.stream.Scrolled() {
-				mode = "scrollback"
+				mode = "scrollback · " + format.Itoa(m.stream.ScrollOffset()) + " lines up"
 			}
-			label = "terminal · " + mode + " · " + shortDir(m.embeddedCwd)
+			label = focusPaneLabel("terminal · "+mode+" · "+shortDir(m.embeddedCwd), m.terminalFocused)
 			right = m.terminalLines(detBoxW-chrome, bodyH-3)
 			if !m.terminalFocused {
 				right = mutedTerminalLines(right)
@@ -166,6 +177,42 @@ func (m *Model) render() string {
 	return head + "\n" + body + "\n" + foot
 }
 
+func (m *Model) activityMark() string {
+	if m.reducedMotion {
+		return "•"
+	}
+	return m.spin.View()
+}
+
+func focusPaneLabel(label string, focused bool) string {
+	if focused {
+		return "▶ " + label
+	}
+	return "  " + label
+}
+
+func (m *Model) killConfirmationLines(w, h int) []string {
+	prompt := m.killConfirm
+	if prompt == nil {
+		return nil
+	}
+	lines := []string{
+		"",
+		sErr.Bold(true).Render("KILL LIVE SESSION?"),
+		"",
+		paneLabel.Render("SESSION") + "  " + sNameOn.Render(format.Truncate(format.Clean(prompt.title), max(1, w-11))),
+		sDim.Render(format.Truncate(prompt.cwd, w)),
+		"",
+		sMid.Render(format.Truncate("The tmux process will stop. Its transcript and summary will be kept.", w)),
+		"",
+		sDim.Render("Press enter or x to kill · esc to cancel"),
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lines
+}
+
 func (m *Model) preparingLines(w, h int) []string {
 	p := m.preparing
 	if p == nil {
@@ -183,7 +230,7 @@ func (m *Model) preparingLines(w, h int) []string {
 	}
 	phase := "PREPARING " + strings.ToUpper(p.agent.String()) + " SESSION"
 	detail := "Orbit is starting the agent inside tmux. The live terminal will appear when the agent is ready."
-	out = append(out, "", paneLabel.Render(m.spin.View()+" "+phase), "")
+	out = append(out, "", paneLabel.Render(m.activityMark()+" "+phase), "")
 	addWrapped("  ", detail, sName)
 	out = append(out, "")
 	addWrapped("  transcript  ", p.title, sMid)
@@ -225,13 +272,17 @@ func (m *Model) dispatchLines(w, h int) []string {
 	if err == nil && strings.HasPrefix(strings.TrimSpace(m.filter.Value()), "@") {
 		agent = "@" + ag.String() + " (from task)"
 	}
-	taskLabel, dirLabel := "TASK · FOCUSED", "DIRECTORY"
+	taskLabel, agentLabel, dirLabel := "TASK · FOCUSED", "AGENT", "DIRECTORY"
+	if m.composerAgentFocused {
+		taskLabel, agentLabel = "TASK", "AGENT · FOCUSED"
+	}
 	if m.dispatchDirFocused {
-		taskLabel, dirLabel = "TASK", "DIRECTORY · FOCUSED"
+		taskLabel, agentLabel, dirLabel = "TASK", "AGENT", "DIRECTORY · FOCUSED"
 	}
 
 	lines := []string{
-		paneLabel.Render("AGENT") + "  " + agentStyle(ag).Render(agent),
+		paneLabel.Render(agentLabel) + "  " + agentStyle(ag).Render(agent),
+		m.agentSelector(contentW),
 		sDim.Render(format.Truncate("Use @claude, @codex, or @copilot at the start of the task to override it.", contentW)),
 		"",
 		paneLabel.Render(taskLabel),
@@ -255,10 +306,63 @@ func (m *Model) dispatchLines(w, h int) []string {
 		}
 	}
 	lines = append(lines, "")
-	if m.status != "" && time.Now().Before(m.statusUntil) {
+	if m.status != "" && (m.statusSticky || time.Now().Before(m.statusUntil)) {
 		lines = append(lines, sErr.Render("▸ "+format.Truncate(m.status, contentW)))
 	} else {
 		lines = append(lines, sDim.Render(format.Truncate("Relative paths use Orbit's working directory; ~ is supported.", contentW)))
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lines
+}
+
+func (m *Model) agentSelector(w int) string {
+	var choices []string
+	for _, ag := range session.AllAgents {
+		name := ag.String()
+		if ag == m.dispatchTo {
+			name = "[" + name + "]"
+		}
+		choices = append(choices, agentStyle(ag).Render(name))
+	}
+	return format.Truncate(strings.Join(choices, "  "), w)
+}
+
+func (m *Model) newSessionLines(w, h int) []string {
+	contentW := max(12, w)
+	m.dispatchDir.SetWidth(contentW)
+	agentLabel, dirLabel := "AGENT · FOCUSED", "DIRECTORY"
+	if m.dispatchDirFocused {
+		agentLabel, dirLabel = "AGENT", "DIRECTORY · FOCUSED"
+	}
+	lines := []string{
+		paneLabel.Render(agentLabel),
+		m.agentSelector(contentW),
+		sDim.Render(format.Truncate("Use ←/→ to choose the interactive agent.", contentW)),
+		"",
+		paneLabel.Render(dirLabel),
+		m.dispatchDir.View(),
+	}
+	if m.dispatchDirFocused {
+		choices := m.dispatchDirectories()
+		room := max(0, min(5, h-len(lines)-3))
+		if room > 0 && len(choices) > 0 {
+			lines = append(lines, sDim.Render("recent project directories"))
+			for i, dir := range choices[:min(room, len(choices))] {
+				marker, style := "  ", sMid
+				if i == m.dispatchDirCursor {
+					marker, style = "▸ ", sNameOn
+				}
+				lines = append(lines, marker+style.Render(format.Truncate(dir, max(8, contentW-2))))
+			}
+		}
+	}
+	lines = append(lines, "")
+	if m.status != "" && (m.statusSticky || time.Now().Before(m.statusUntil)) {
+		lines = append(lines, sErr.Render("▸ "+format.Truncate(m.status, contentW)))
+	} else {
+		lines = append(lines, sDim.Render("Enter starts the agent inside Orbit."))
 	}
 	if len(lines) > h {
 		lines = lines[:h]
@@ -271,7 +375,11 @@ func (m *Model) dispatchLines(w, h int) []string {
 // paints that indicator on the tab itself, so a session wanting attention is
 // visible even when orbit's tab isn't the one you're looking at.
 func (m *Model) View() tea.View {
-	v := tea.NewView(m.render())
+	content := m.render()
+	if m.noColor {
+		content = ansi.Strip(content)
+	}
+	v := tea.NewView(content)
 	v.AltScreen = true
 	v.WindowTitle = "orbit"
 	// Keep wheel events as mouse messages throughout the dashboard. Turning
@@ -306,9 +414,9 @@ func (m *Model) renderEmbedded() string {
 	w, h := m.terminalSize()
 	mode := "FOCUSED"
 	if m.stream != nil && m.stream.Scrolled() {
-		mode = "SCROLLBACK"
+		mode = "SCROLLBACK · " + format.Itoa(m.stream.ScrollOffset()) + " LINES UP"
 	}
-	title := "  TERMINAL " + mode + " · " + m.embeddedName
+	title := "  ▶ TERMINAL " + mode + " · " + m.embeddedName
 	if m.embeddedCwd != "" {
 		title += " · " + m.embeddedCwd
 	}
@@ -317,7 +425,7 @@ func (m *Model) renderEmbedded() string {
 
 	screen := strings.Join(m.terminalLines(w, h), "\n")
 	body := lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(screen)
-	helpText := "  Tab/Ctrl+g sessions   Ctrl+f split   Ctrl+e width   wheel/keys → agent"
+	helpText := "  INPUT → TERMINAL   Tab/Ctrl+g sessions   Ctrl+f split   Ctrl+e width"
 	if m.stream != nil && m.stream.Scrolled() {
 		helpText = "  SCROLLBACK · wheel to browse · any key returns to live · Tab sessions"
 	}
@@ -430,6 +538,20 @@ func (m *Model) header() string {
 	if len(metrics) == 0 {
 		metrics = append(metrics, sDim.Render("no active work"))
 	}
+	if m.h <= 24 {
+		left := " " + sTitle.Render("orbit")
+		right := tagline.Render(format.Itoa(len(m.view))+" of "+format.Itoa(len(m.all))+" shown") +
+			sDim.Render("  ·  ") + strings.Join(metrics, sDim.Render("  ·  "))
+		if !m.dispatching && !m.newing && (m.filtering || m.filter.Value() != "") {
+			right = m.filter.View()
+		} else if notice, style := m.headerNotice(); notice != "" {
+			right = style.Render("◆ " + notice)
+		}
+		available := max(1, m.w-lipgloss.Width(left)-1)
+		right = ansi.Truncate(right, available, "")
+		gap := max(1, m.w-lipgloss.Width(left)-lipgloss.Width(right))
+		return left + strings.Repeat(" ", gap) + right
+	}
 
 	// Spell the mapping out: the two-letter tags in the list are only obvious
 	// once you've been told what they stand for.
@@ -455,7 +577,7 @@ func (m *Model) header() string {
 		tagline.Render(format.Itoa(len(m.view))+" of "+format.Itoa(len(m.all))+" shown") +
 			tagline.Render("  ·  ") + strings.Join(legend, tagline.Render(" · ")),
 	}
-	if !m.dispatching && (m.filtering || m.filter.Value() != "") {
+	if !m.dispatching && !m.newing && (m.filtering || m.filter.Value() != "") {
 		stats = append(stats, m.filter.View())
 	}
 
@@ -494,12 +616,12 @@ func (m *Model) header() string {
 // slot. Modes with their own persistent feedback keep using their local pane
 // or footer and do not duplicate the same message here.
 func (m *Model) headerNotice() (string, lipgloss.Style) {
-	if m.status == "" || time.Now().After(m.statusUntil) || m.updating ||
-		m.preparing != nil || m.dispatching || m.filtering {
+	if m.status == "" || (!m.statusSticky && time.Now().After(m.statusUntil)) || m.updating ||
+		m.preparing != nil || m.dispatching || m.newing || m.filtering {
 		return "", lipgloss.Style{}
 	}
 	style := sHead
-	if strings.Contains(m.status, "failed") || strings.Contains(m.status, "not installed") {
+	if m.statusSticky {
 		style = sErr
 	}
 	return m.status, style
@@ -515,7 +637,7 @@ func (m *Model) coverageBar() string {
 	m.prog.SetWidth(12)
 	label := format.Itoa(done) + "/" + format.Itoa(total) + " summarised"
 	if inflight > 0 {
-		label += sDim.Render("  ") + sTok.Render(m.spin.View()+" "+format.Itoa(inflight)+" queued")
+		label += sDim.Render("  ") + sTok.Render(m.activityMark()+" "+format.Itoa(inflight)+" queued")
 	}
 	return m.prog.ViewAs(float64(done)/float64(total)) + "  " + tagline.Render(label)
 }
@@ -527,7 +649,7 @@ func (m *Model) list(w, h int) []string {
 	}
 
 	if len(m.view) == 0 {
-		return []string{"", sDim.Render("  nothing matches — press a to show everything")}
+		return m.emptyList(w)
 	}
 	if m.top >= len(m.view) {
 		m.top = len(m.view) - 1
@@ -572,6 +694,34 @@ func (m *Model) list(w, h int) []string {
 		out = append(out, sDim.Render("  + "+format.Itoa(more)+" more"))
 	}
 	return out
+}
+
+// emptyList explains why the list is empty and offers an action that can
+// actually change that state. A single "show everything" message is wrong for
+// a first run, a live filter, and a transcript search in three different ways.
+func (m *Model) emptyList(w int) []string {
+	title, action := "No sessions to show", "? shortcuts"
+	switch {
+	case m.scanning && len(m.all) == 0:
+		title, action = m.activityMark()+" Scanning sessions", "Found sessions appear here"
+	case m.filtering && m.searching:
+		title, action = "Search inside transcripts", "enter search  ·  esc cancel"
+	case m.query != "":
+		title = "No transcript matches"
+		action = "esc clear search"
+	case !m.searching && strings.TrimSpace(m.filter.Value()) != "":
+		title = "No title or path matches"
+		action = "esc clear filter"
+	case len(m.all) == 0:
+		title, action = "No agent sessions found", "d dispatch a task  ·  ? shortcuts"
+	case !m.showAll:
+		title, action = "No recent titled sessions", "a show all sessions"
+	}
+	return []string{
+		"",
+		sName.Render("  " + ansi.Truncate(title, max(1, w-2), "")),
+		sDim.Render("  " + format.Truncate(action, max(1, w-2))),
+	}
 }
 
 func (m *Model) listSpanHeight(start, end int, showGroups bool) int {
@@ -623,7 +773,7 @@ func (m *Model) row(s *session.Session, sel bool, w int) []string {
 	preparing := m.preparing != nil && m.preparing.id == s.ID && m.preparing.agent == s.Agent
 	icon := visualState.Icon()
 	if visualState == session.Working || preparing {
-		icon = m.spin.View() // a still dot reads as stalled; motion reads as busy
+		icon = m.activityMark()
 		visualState = session.Working
 	}
 	// In logo mode the agent cell is raw escape codes: the foreground colour
@@ -701,7 +851,7 @@ func (m *Model) detail(w, h int) []string {
 		label, detail := dispatchLine(d)
 		head := paneLabel.Render("▸ " + label)
 		if d.Status == dispatch.Running {
-			head += sDim.Render("  ") + sMid.Render(m.spin.View())
+			head += sDim.Render("  ") + sMid.Render(m.activityMark())
 		}
 		add(head)
 		if detail != "" {
@@ -739,7 +889,7 @@ func (m *Model) detail(w, h int) []string {
 		add("")
 	} else if elapsed, running := m.summaryElapsed(s.ID); running {
 		add(paneLabel.Render("▸ summary"))
-		add("  " + sDim.Render(m.spin.View()+" "+s.Agent.String()+" · "+
+		add("  " + sDim.Render(m.activityMark()+" "+s.Agent.String()+" · "+
 			format.Itoa(int(elapsed.Seconds()))+"s elapsed"))
 		add("")
 	} else if m.cfg.Summary.Enabled {
@@ -800,17 +950,28 @@ func (m *Model) footer() string {
 	// ends with orbit restarting itself, so it stays on screen throughout
 	// rather than expiring mid-download and leaving that unexplained.
 	if m.updating {
-		return " " + sHead.Render(m.spin.View()+" "+m.status)
+		return " " + sHead.Render(m.activityMark()+" "+m.status)
+	}
+	if m.killConfirm != nil {
+		return m.footerLine([][2]string{{"⏎ / x", "kill session"}, {"esc", "cancel"}})
+	}
+	if m.diagnosticsOpen {
+		return m.footerLine([][2]string{{"r", "refresh"}, {"c", "clear last error"}, {"D / esc", "close"}})
 	}
 	if m.preparing != nil {
 		p := m.preparing
 		elapsed := int(time.Since(p.started).Seconds())
-		return " " + sHead.Render(m.spin.View()+" preparing "+p.agent.String()+" live pane") +
+		return " " + sHead.Render(m.activityMark()+" preparing "+p.agent.String()+" live pane") +
 			sDim.Render("  ·  "+format.Itoa(elapsed)+"s  ·  it will open automatically")
 	}
 	if m.dispatching {
 		return m.footerLine([][2]string{
 			{"tab", "switch field"}, {"↑↓", "directory"}, {"⏎", "accept"}, {"esc", "cancel"},
+		})
+	}
+	if m.newing {
+		return m.footerLine([][2]string{
+			{"←→", "agent"}, {"tab", "switch field"}, {"↑↓", "directory"}, {"⏎", "start"}, {"esc", "cancel"},
 		})
 	}
 	if m.showHelp {
@@ -833,6 +994,63 @@ func (m *Model) footer() string {
 		{"n", "new"}, {"d", "dispatch"},
 	}
 	return m.footerLine(keys)
+}
+
+func (m *Model) diagnosticLines(w, h int) []string {
+	value := func(label, text string) string {
+		return paneLabel.Render(label) + "  " + format.Truncate(text, max(1, w-len(label)-2))
+	}
+	scan := "not completed yet"
+	if !m.lastScan.IsZero() {
+		scan = format.Itoa(m.lastScanCount) + " sessions · " + format.RelTime(m.lastScan)
+	}
+	if m.scanning {
+		scan += " · scanning for " + format.Itoa(int(time.Since(m.scanStart).Seconds())) + "s"
+	}
+	preview := "idle"
+	if m.streamOpening {
+		preview = "connecting"
+	} else if m.stream != nil {
+		preview = "streaming " + m.stream.Session()
+	} else if m.previewName != "" {
+		preview = "polling " + m.previewName
+	}
+	tmuxStatus := m.diagnostics.tmux
+	if tmuxStatus == "" {
+		tmuxStatus = "checking…"
+	}
+	agents := strings.Join(m.diagnostics.agents, " · ")
+	if agents == "" {
+		agents = "checking…"
+	}
+	lastErr := "none recorded"
+	if m.lastError != "" {
+		lastErr = m.lastError
+		if !m.lastErrorAt.IsZero() {
+			lastErr += " · " + format.RelTime(m.lastErrorAt)
+		}
+	}
+	dump := m.dumpPath
+	if dump == "" {
+		dump = "not configured"
+	}
+	lines := []string{
+		value("ORBIT", m.version),
+		value("TMUX", tmuxStatus),
+		value("AGENTS", agents),
+		"",
+		value("SCAN", scan),
+		value("PREVIEW", preview),
+		value("STACK DUMP", dump),
+		"",
+		value("LAST ERROR", lastErr),
+		"",
+		sDim.Render(format.Truncate("Errors remain visible until Esc or c clears them.", w)),
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lines
 }
 
 func (m *Model) footerLine(keys [][2]string) string {
@@ -898,12 +1116,13 @@ func (m *Model) shortcutHelp(w, h int) []string {
 	section("NAVIGATE",
 		pair{binding{"↑ / k", "previous session"}, binding{"↓ / j", "next session"}},
 		pair{binding{"g", "first session"}, binding{"G", "last session"}},
+		pair{binding{"[", "previous attention"}, binding{"]", "next attention"}},
 	)
 	section("SESSIONS",
 		pair{binding{"⏎", "attach"}, binding{"tab", "focus live pane"}},
 		pair{binding{"i", "attach here"}, binding{"t", "open in new tab"}},
 		pair{binding{"w", "open in new window"}, binding{"n", "new session"}},
-		pair{binding{"d", "dispatch task"}, binding{"x", "kill live session"}},
+		pair{binding{"d", "dispatch task"}, binding{"x", "confirm kill session"}},
 	)
 	section("FIND & ORGANIZE",
 		pair{binding{"/", "filter list"}, binding{"f", "search transcripts"}},
@@ -912,7 +1131,8 @@ func (m *Model) shortcutHelp(w, h int) []string {
 	)
 	section("LIVE PANE & APP",
 		pair{binding{"tab / ctrl+g", "sessions"}, binding{"ctrl+f", "full screen"}},
-		pair{binding{"ctrl+e", "toggle width"}, binding{"q", "quit"}},
+		pair{binding{"ctrl+e", "toggle width"}, binding{"D", "diagnostics"}},
+		pair{binding{"esc", "dismiss error"}, binding{"q", "quit"}},
 	)
 	if len(lines) > h {
 		lines = lines[:max(0, h)]
