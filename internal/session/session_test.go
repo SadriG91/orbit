@@ -349,6 +349,7 @@ func TestResolveDispatchStates(t *testing.T) {
 		// and ▲ is how orbit says so — including the desktop notification.
 		{"failed", dispatch.Failed, false, NeedsApproval},
 		{"finished", dispatch.Done, false, YourTurn},
+		{"cancelled", dispatch.Cancelled, false, Dormant},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

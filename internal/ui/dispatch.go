@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -33,6 +34,13 @@ import (
 // dispatchedMsg reports a dispatch that has been started, or failed to start.
 type dispatchedMsg struct {
 	agent, cwd, err string
+	draft           *dispatchDraft
+}
+
+type dispatchDraft struct {
+	agent session.Agent
+	cwd   string
+	task  string
 }
 
 // dispatch starts a headless run of ag in cwd on the given task.
@@ -48,37 +56,45 @@ func (m *Model) dispatch(ag session.Agent, cwd, prompt string) tea.Cmd {
 	if prompt == "" {
 		return nil
 	}
+	if err := m.dispatchPreflight(ag); err != nil {
+		return func() tea.Msg { return statusMsg(err.Error()) }
+	}
+	return m.launchDispatch(&dispatchDraft{agent: ag, cwd: cwd, task: prompt})
+}
+
+func (m *Model) dispatchPreflight(ag session.Agent) error {
 	if !ag.Installed() {
-		return func() tea.Msg { return statusMsg(ag.String() + " is not installed") }
+		return fmt.Errorf("%s is not installed", ag.String())
 	}
 	if ag == session.Copilot && !m.cfg.Dispatch.CopilotAllowAllTools {
-		return func() tea.Msg {
-			return statusMsg("copilot can only be dispatched with every tool allowed — " +
-				"set dispatch.copilot_allow_all_tools if that is what you want")
-		}
+		return errors.New("copilot can only be dispatched with every tool allowed — " +
+			"set dispatch.copilot_allow_all_tools if that is what you want")
 	}
+	return nil
+}
 
+func (m *Model) launchDispatch(draft *dispatchDraft) tea.Cmd {
 	rec := &dispatch.Record{
 		ID:      dispatch.NewID(),
-		Agent:   ag.String(),
-		Cwd:     cwd,
-		Prompt:  prompt,
+		Agent:   draft.agent.String(),
+		Cwd:     draft.cwd,
+		Prompt:  draft.task,
 		Status:  dispatch.Running,
 		Started: time.Now(),
 	}
 	// Claude and copilot let orbit choose the conversation id up front, so the
 	// run is joined to a session from its first tick. Codex only reveals its
 	// thread_id on the first event, and the runner fills it in then.
-	if ag != session.Codex {
+	if draft.agent != session.Codex {
 		rec.SessionID = rec.ID
 	}
 
-	m.say("dispatching " + ag.String() + " in " + cwd + "…")
+	m.say("dispatching " + draft.agent.String() + " in " + draft.cwd + "…")
 	return func() tea.Msg {
 		if err := startDispatch(rec); err != nil {
-			return dispatchedMsg{agent: rec.Agent, cwd: cwd, err: err.Error()}
+			return dispatchedMsg{agent: rec.Agent, cwd: draft.cwd, err: err.Error(), draft: draft}
 		}
-		return dispatchedMsg{agent: rec.Agent, cwd: cwd}
+		return dispatchedMsg{agent: rec.Agent, cwd: draft.cwd, draft: draft}
 	}
 }
 
@@ -236,8 +252,8 @@ func (m *Model) updateDispatchInput(msg tea.Msg) tea.Cmd {
 	if m.dispatchDirFocused {
 		m.dispatchDir, cmd = m.dispatchDir.Update(msg)
 		m.dispatchDirCursor = -1
-	} else if !m.composerAgentFocused && m.dispatching {
-		m.filter, cmd = m.filter.Update(msg)
+	} else if m.dispatching {
+		m.dispatchTask, cmd = m.dispatchTask.Update(msg)
 	}
 	return cmd
 }
@@ -246,22 +262,20 @@ func (m *Model) beginComposer(newSession bool) {
 	ag, cwd := m.dispatchTarget()
 	m.dispatchTo, m.dispatchInto = ag, cwd
 	m.newing, m.dispatching = newSession, !newSession
-	m.filtering = !newSession
+	m.filtering = false
 	m.composerAgentFocused = newSession
 	m.dispatchDirFocused = false
 	m.dispatchDirCursor = -1
 	m.status = ""
-	m.filter.Prompt = "› "
-	m.filter.Placeholder = "describe the task"
-	m.filter.CharLimit = 4000
 	m.filter.SetValue("")
+	m.dispatchTask.SetValue("")
 	m.dispatchDir.Prompt = "› "
 	m.dispatchDir.SetValue(cwd)
 	m.dispatchDir.Blur()
 	if newSession {
-		m.filter.Blur()
+		m.dispatchTask.Blur()
 	} else {
-		m.filter.Focus()
+		m.dispatchTask.Focus()
 	}
 }
 
@@ -279,10 +293,10 @@ func (m *Model) cycleComposerAgent(delta int) {
 func (m *Model) focusComposer(field int) tea.Cmd {
 	m.composerAgentFocused = field == 1
 	m.dispatchDirFocused = field == 2
-	m.filter.Blur()
+	m.dispatchTask.Blur()
 	m.dispatchDir.Blur()
 	if field == 0 {
-		return m.filter.Focus()
+		return m.dispatchTask.Focus()
 	}
 	if field == 2 {
 		m.dispatchDirCursor = -1
@@ -345,42 +359,16 @@ func (m *Model) dispatchKey(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		m.filtering = false
-		m.filter.SetValue("")
+		m.dispatchTask.SetValue("")
 		m.dispatchDir.SetValue("")
-		m.filter.Blur()
+		m.dispatchTask.Blur()
 		m.resetPrompt()
 		m.rebuild()
 		return nil
 	case "tab":
-		switch {
-		case m.dispatchDirFocused:
-			return m.focusComposer(0)
-		case m.composerAgentFocused:
-			return m.focusComposer(2)
-		default:
-			return m.focusComposer(1)
-		}
+		return m.focusDispatchDirectory(!m.dispatchDirFocused)
 	case "shift+tab":
-		switch {
-		case m.dispatchDirFocused:
-			return m.focusComposer(1)
-		case m.composerAgentFocused:
-			return m.focusComposer(0)
-		default:
-			return m.focusComposer(2)
-		}
-	case "left", "h":
-		if m.composerAgentFocused {
-			m.cycleComposerAgent(-1)
-			return nil
-		}
-		return m.updateDispatchInput(msg)
-	case "right", "l":
-		if m.composerAgentFocused {
-			m.cycleComposerAgent(1)
-			return nil
-		}
-		return m.updateDispatchInput(msg)
+		return m.focusDispatchDirectory(!m.dispatchDirFocused)
 	case "up":
 		if m.dispatchDirFocused {
 			m.moveDispatchDirectory(-1)
@@ -397,10 +385,12 @@ func (m *Model) dispatchKey(msg tea.KeyPressMsg) tea.Cmd {
 		if m.dispatchDirFocused {
 			return m.focusDispatchDirectory(false)
 		}
-		if m.composerAgentFocused {
-			return m.focusComposer(0)
+		return m.updateDispatchInput(msg)
+	case "ctrl+enter", "alt+enter":
+		if m.dispatchDirFocused {
+			return m.focusDispatchDirectory(false)
 		}
-		ag, task, err := parseDispatchPrompt(m.filter.Value(), m.dispatchTo)
+		ag, task, err := parseDispatchPrompt(m.dispatchTask.Value(), m.dispatchTo)
 		if err != nil {
 			m.say(err.Error())
 			return nil
@@ -414,15 +404,87 @@ func (m *Model) dispatchKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.say(err.Error())
 			return m.focusDispatchDirectory(true)
 		}
-		m.filtering = false
-		m.filter.SetValue("")
-		m.dispatchDir.SetValue("")
-		m.filter.Blur()
-		m.resetPrompt()
-		return m.dispatch(ag, cwd, task)
+		if err := m.dispatchPreflight(ag); err != nil {
+			m.say(err.Error())
+			return nil
+		}
+		m.dispatchReview = &dispatchDraft{agent: ag, cwd: cwd, task: task}
+		m.dispatchTask.Blur()
+		m.dispatchDir.Blur()
+		return nil
 	default:
 		return m.updateDispatchInput(msg)
 	}
+}
+
+func (m *Model) dispatchReviewKey(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.dispatchReview = nil
+		m.dispatchDirFocused = false
+		return m.dispatchTask.Focus()
+	case "enter":
+		draft := m.dispatchReview
+		if draft == nil {
+			return nil
+		}
+		m.dispatchReview = nil
+		m.dispatchLaunching = draft
+		m.filtering = false
+		m.dispatchTask.Blur()
+		m.dispatchDir.Blur()
+		m.dispatching = false
+		return m.launchDispatch(draft)
+	}
+	return nil
+}
+
+func (m *Model) retryDispatch() tea.Cmd {
+	s := m.sel()
+	if s == nil || s.Dispatch == nil {
+		m.say("that session has no dispatch to retry")
+		return nil
+	}
+	if s.Dispatch.Live() {
+		m.say("that dispatch is still running")
+		return nil
+	}
+	m.beginComposer(false)
+	m.dispatchTo = s.Agent
+	m.dispatchInto = s.Dispatch.Cwd
+	m.dispatchDir.SetValue(s.Dispatch.Cwd)
+	m.dispatchTask.SetValue("@" + s.Agent.String() + " " + s.Dispatch.Prompt)
+	m.dispatchTask.CursorEnd()
+	return m.dispatchTask.Focus()
+}
+
+func (m *Model) openDispatchLog() tea.Cmd {
+	s := m.sel()
+	if s == nil || s.Dispatch == nil {
+		m.say("that session has no dispatch log")
+		return nil
+	}
+	path := dispatch.LogPath(s.Dispatch.ID)
+	if _, err := os.Stat(path); err != nil {
+		m.say("dispatch log is not available yet")
+		return nil
+	}
+	pager, err := exec.LookPath("less")
+	args := []string{"-R", path}
+	if err != nil {
+		pager, err = exec.LookPath("more")
+		args = []string{path}
+	}
+	if err != nil {
+		m.say("install less or more to open dispatch logs")
+		return nil
+	}
+	return tea.ExecProcess(exec.Command(pager, args...), func(err error) tea.Msg {
+		if err != nil {
+			return statusMsg("could not open dispatch log: " + err.Error())
+		}
+		return statusMsg("closed dispatch log")
+	})
 }
 
 func (m *Model) newSessionKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -489,6 +551,8 @@ func dispatchLine(d *dispatch.Record) (label, detail string) {
 		return "dispatched · stopped for you", d.Pending
 	case dispatch.Failed:
 		return "dispatched · failed", d.Err
+	case dispatch.Cancelled:
+		return "dispatched · cancelled", "stopped from orbit"
 	}
 	return "dispatched · done", ""
 }

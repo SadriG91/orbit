@@ -133,7 +133,8 @@ type Session struct {
 	// when there is one. Joined on by the UI's scan, which reads the whole
 	// record directory once rather than a file per session — see
 	// dispatch.Active.
-	Dispatch *dispatch.Record
+	Dispatch     *dispatch.Record
+	DispatchOnly bool // no transcript exists yet; this row is the dispatch record
 }
 
 // ShortCwd is home-relative and at most two trailing components.
@@ -213,6 +214,9 @@ func (s *Session) Resolve(now time.Time) {
 			return
 		case dispatch.Done:
 			s.State = YourTurn
+			return
+		case dispatch.Cancelled:
+			s.State = Dormant
 			return
 		}
 	}

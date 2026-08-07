@@ -244,6 +244,7 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 		case st.done:
 			res.done = true
 			if st.note != "" {
+				r.Result = st.note
 				say("%s", st.note)
 			}
 
@@ -261,6 +262,7 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 			// worth reading.
 			if r.Status == Running {
 				r.Activity = st.activity
+				rememberActivity(r, st.activity)
 				save("progress")
 			}
 
@@ -278,6 +280,22 @@ func consume(stdout io.Reader, r *Record, w *syncWriter, opts Options, say func(
 		res.err = "reading the event stream: " + err.Error()
 	}
 	return res
+}
+
+const recentActivityLimit = 5
+
+func rememberActivity(r *Record, activity string) {
+	activity = strings.TrimSpace(activity)
+	if activity == "" {
+		return
+	}
+	if n := len(r.Activities); n > 0 && r.Activities[n-1] == activity {
+		return
+	}
+	r.Activities = append(r.Activities, activity)
+	if len(r.Activities) > recentActivityLimit {
+		r.Activities = append([]string(nil), r.Activities[len(r.Activities)-recentActivityLimit:]...)
+	}
 }
 
 // finish reconciles what the stream said with how the process exited, and

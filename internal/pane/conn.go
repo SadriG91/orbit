@@ -85,6 +85,12 @@ type Conn struct {
 
 	ready     chan struct{}
 	readyOnce sync.Once
+	// releaseOnce owns the OS resources separately from closed. The protocol
+	// reader marks a connection closed before the UI observes Done; treating
+	// that logical state as proof of cleanup leaked the PTY on every remote
+	// disconnect.
+	releaseOnce sync.Once
+	releaseErr  error
 }
 
 // Dial attaches a control client to a session on orbit's tmux server.
@@ -318,19 +324,26 @@ func (c *Conn) Resize(width, height int) error {
 
 func (c *Conn) Close() error {
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil
-	}
 	c.closed = true
 	c.mu.Unlock()
+	return c.release()
+}
 
-	c.ptmx.Close()
-	if c.cmd.Process != nil {
-		c.cmd.Process.Kill()
-	}
-	c.cmd.Wait()
-	return nil
+func (c *Conn) release() error {
+	c.releaseOnce.Do(func() {
+		// Dial always supplies both fields. The guards keep the protocol-only
+		// unit-test Conn useful without manufacturing a child process for it.
+		if c.ptmx != nil {
+			c.releaseErr = c.ptmx.Close()
+		}
+		if c.cmd != nil {
+			if c.cmd.Process != nil {
+				_ = c.cmd.Process.Kill()
+			}
+			_ = c.cmd.Wait()
+		}
+	})
+	return c.releaseErr
 }
 
 // shutdown wakes anything blocked on the connection once the reader stops.
@@ -346,6 +359,7 @@ func (c *Conn) shutdown() {
 	}
 	close(c.done)
 	close(c.notes)
+	_ = c.release()
 }
 
 // readFrom runs the protocol state machine. Split out from the pty so the

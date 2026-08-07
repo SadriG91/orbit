@@ -31,6 +31,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,10 +45,11 @@ import (
 type Status string
 
 const (
-	Running  Status = "running"   // the agent is working
-	NeedsYou Status = "needs_you" // stopped at an approval; waiting to be taken over
-	Done     Status = "done"      // the turn completed
-	Failed   Status = "failed"    // the CLI errored, timed out, or was killed
+	Running   Status = "running"   // the agent is working
+	NeedsYou  Status = "needs_you" // stopped at an approval; waiting to be taken over
+	Done      Status = "done"      // the turn completed
+	Failed    Status = "failed"    // the CLI errored, timed out, or was killed
+	Cancelled Status = "cancelled" // deliberately stopped from orbit
 )
 
 // Record is one dispatch, from the moment orbit decides to start it. The
@@ -67,10 +69,12 @@ type Record struct {
 	Prompt    string `json:"prompt"`
 	Tmux      string `json:"tmux,omitempty"` // the tmux session the runner lives in
 
-	Status   Status `json:"status"`
-	Activity string `json:"activity,omitempty"` // the last thing it was seen doing
-	Pending  string `json:"pending,omitempty"`  // the tool call it handed back on
-	Err      string `json:"err,omitempty"`
+	Status     Status   `json:"status"`
+	Activity   string   `json:"activity,omitempty"`   // the last thing it was seen doing
+	Activities []string `json:"activities,omitempty"` // recent distinct steps, oldest first
+	Result     string   `json:"result,omitempty"`     // the agent's final response, when emitted
+	Pending    string   `json:"pending,omitempty"`    // the tool call it handed back on
+	Err        string   `json:"err,omitempty"`
 
 	Started time.Time `json:"started"`
 	Updated time.Time `json:"updated"`
@@ -106,6 +110,22 @@ func Load(id string) (*Record, bool) {
 	return read(file(id))
 }
 
+// MarkCancelled records an intentional stop after orbit has killed the runner.
+// The runner cannot reliably write its own terminal state once its tmux session
+// is gone, so the dashboard owns this transition.
+func MarkCancelled(id string) error {
+	r, ok := Load(id)
+	if !ok {
+		return fmt.Errorf("dispatch %q not found", id)
+	}
+	r.Status = Cancelled
+	r.Activity = ""
+	r.Pending = ""
+	r.Err = ""
+	r.Ended = time.Now()
+	return Save(r)
+}
+
 func read(path string) (*Record, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -122,17 +142,11 @@ func read(path string) (*Record, bool) {
 // because ids are only unique within one agent's store.
 func Key(agent, sessionID string) string { return agent + "\x00" + sessionID }
 
-// Active returns every record that has a session to attach to, keyed by Key.
-//
-// The whole directory is read at once rather than one file per session, which
-// is the opposite of how hooks.Load works and deliberate: there are a handful
-// of dispatches and hundreds of sessions, so a single ReadDir is cheaper than
-// a stat per session — and codex records cannot be found by session id at all
-// until the runner has learned the thread_id.
-//
-// When two records share a session — a session dispatched to more than once —
-// the newest wins, since it is the one describing what is happening now.
-func Active() map[string]*Record {
+// Records returns every readable dispatch, oldest first. Callers that need to
+// show launch failures and agents which have not announced a session id yet
+// must not use Active: those records are deliberately unjoinable but still
+// important UI state.
+func Records() []*Record {
 	entries, err := os.ReadDir(Dir())
 	if err != nil {
 		return nil
@@ -142,14 +156,24 @@ func Active() map[string]*Record {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		if r, ok := read(filepath.Join(Dir(), e.Name())); ok && r.SessionID != "" {
+		if r, ok := read(filepath.Join(Dir(), e.Name())); ok {
 			recs = append(recs, r)
 		}
 	}
 	sort.Slice(recs, func(i, j int) bool { return recs[i].Started.Before(recs[j].Started) })
+	return recs
+}
+
+// Active returns every record that has a session to attach to, keyed by Key.
+// When two records share a session — a session dispatched to more than once —
+// the newest wins, since Records is oldest first.
+func Active() map[string]*Record {
+	recs := Records()
 	out := make(map[string]*Record, len(recs))
 	for _, r := range recs {
-		out[Key(r.Agent, r.SessionID)] = r
+		if r.SessionID != "" {
+			out[Key(r.Agent, r.SessionID)] = r
+		}
 	}
 	return out
 }

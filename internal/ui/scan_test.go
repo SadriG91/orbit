@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/session"
 )
 
@@ -75,6 +76,32 @@ func TestScanHandsOutCopies(t *testing.T) {
 		if a[i] == b[i] {
 			t.Fatalf("scan handed out the cached *Session for %s, which the caller mutates and renders", a[i].ID)
 		}
+	}
+}
+
+func TestScanKeepsUnlinkedDispatchVisible(t *testing.T) {
+	fakeHome(t)
+	if err := dispatch.Save(&dispatch.Record{
+		ID: "launch-failed", Agent: "codex", Cwd: "/tmp/proj",
+		Prompt: "fix the launch", Status: dispatch.Failed, Err: "tmux refused",
+		Started: time.Now(), Ended: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := scan(7, session.NewIndex()).(scanMsg)
+	var found *session.Session
+	for _, s := range msg.sessions {
+		if s.ID == dispatchIDPrefix+"launch-failed" {
+			found = s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("scan hid a dispatch that had not created a transcript")
+	}
+	if !found.DispatchOnly || found.Dispatch == nil || found.State != session.NeedsApproval {
+		t.Errorf("standalone dispatch = %+v", found)
 	}
 }
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,10 @@ import (
 func press(m *Model, key string) tea.Cmd {
 	_, cmd := m.Update(tea.KeyPressMsg{Code: rune(key[0]), Text: key})
 	return cmd
+}
+
+func reviewDispatch(m *Model) {
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
 }
 
 func typeInto(m *Model, s string) {
@@ -37,14 +42,13 @@ func modelWithSession(t *testing.T, ag session.Agent) *Model {
 	return m
 }
 
-// The task field is shared with the quick filter and full-text search. `d`
-// has to set it up and Esc has to restore it, while the directory has its own
-// field and focus state.
+// Dispatch has its own multiline task editor, leaving the quick filter's
+// value and limits independent.
 func TestDispatchPromptSetsUpAndTearsDown(t *testing.T) {
 	m := modelWithSession(t, session.Codex)
 	press(m, "d")
 
-	if !m.dispatching || !m.filtering {
+	if !m.dispatching || m.filtering {
 		t.Fatalf("d did not open the dispatch prompt: dispatching=%v filtering=%v", m.dispatching, m.filtering)
 	}
 	if m.dispatchTo != session.Codex {
@@ -56,8 +60,8 @@ func TestDispatchPromptSetsUpAndTearsDown(t *testing.T) {
 	if !strings.Contains(stripANSI(m.render()), "@codex (default)") {
 		t.Error("composer does not show the default agent")
 	}
-	if m.filter.CharLimit <= 80 {
-		t.Errorf("CharLimit = %d, too short for a task description", m.filter.CharLimit)
+	if m.dispatchTask.CharLimit <= 80 {
+		t.Errorf("CharLimit = %d, too short for a task description", m.dispatchTask.CharLimit)
 	}
 
 	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
@@ -149,15 +153,11 @@ func TestResolveDispatchDir(t *testing.T) {
 func TestDispatchComposerFocusAndValidation(t *testing.T) {
 	m := modelWithSession(t, session.Claude)
 	press(m, "d")
-	m.filter.SetValue("@codex check feature X")
+	m.dispatchTask.SetValue("@codex check feature X")
 
 	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if !m.composerAgentFocused || m.filter.Focused() {
-		t.Fatal("first Tab did not move focus from task to agent")
-	}
-	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if !m.dispatchDirFocused || !m.dispatchDir.Focused() || m.filter.Focused() {
-		t.Fatal("second Tab did not move focus from agent to directory")
+	if !m.dispatchDirFocused || !m.dispatchDir.Focused() || m.dispatchTask.Focused() {
+		t.Fatal("Tab did not move focus from task to directory")
 	}
 	m.dispatchDir.SetValue("")
 	typeInto(m, filepath.Join(t.TempDir(), "missing"))
@@ -165,7 +165,7 @@ func TestDispatchComposerFocusAndValidation(t *testing.T) {
 	if m.dispatchDirFocused {
 		t.Fatal("Enter in directory did not return focus to task")
 	}
-	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // task Enter validates and dispatches
+	reviewDispatch(m) // Ctrl+Enter validates and opens review
 	if !m.dispatching || !m.dispatchDirFocused {
 		t.Fatal("invalid directory closed the composer instead of focusing the field")
 	}
@@ -177,8 +177,8 @@ func TestDispatchComposerFocusAndValidation(t *testing.T) {
 func TestDispatchComposerRejectsUnknownMention(t *testing.T) {
 	m := modelWithSession(t, session.Claude)
 	press(m, "d")
-	m.filter.SetValue("@gemini check feature X")
-	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m.dispatchTask.SetValue("@gemini check feature X")
+	reviewDispatch(m)
 	if !m.dispatching || m.dispatchDirFocused {
 		t.Fatal("unknown agent did not leave the task field open")
 	}
@@ -193,7 +193,7 @@ func TestDispatchComposerOwnsAn80x24Frame(t *testing.T) {
 	press(m, "d")
 	out := m.render()
 	plain := stripANSI(out)
-	for _, want := range []string{"SESSIONS", "DISPATCH TASK", "AGENT", "TASK · FOCUSED", "DIRECTORY", "@claude (default)", "switch field"} {
+	for _, want := range []string{"SESSIONS", "DISPATCH TASK", "AGENT", "TASK · FOCUSED", "DIRECTORY", "@claude (default)", "task / directory"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("composer missing %q:\n%s", want, plain)
 		}
@@ -221,7 +221,6 @@ func TestDispatchDirectoryPickerUsesKnownProjects(t *testing.T) {
 	press(m, "d")
 
 	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if !m.dispatchDirFocused || m.dispatchDirCursor != 0 {
 		t.Fatalf("directory picker did not select its default: focused=%v cursor=%d", m.dispatchDirFocused, m.dispatchDirCursor)
 	}
@@ -236,6 +235,126 @@ func TestDispatchDirectoryPickerUsesKnownProjects(t *testing.T) {
 	}
 	if len(m.view) != 2 {
 		t.Error("directory picker changed the mounted Sessions list")
+	}
+}
+
+func TestDispatchDirectoryPickerScrollsToItsCursor(t *testing.T) {
+	m := modelWithSession(t, session.Claude)
+	for i := 0; i < 8; i++ {
+		m.all = append(m.all, &session.Session{
+			Agent: session.Codex, ID: fmt.Sprintf("extra-%d", i),
+			Cwd: fmt.Sprintf("/work/project-%d", i), Title: "extra", Modified: time.Now(),
+		})
+	}
+	m.rebuild()
+	press(m, "d")
+	m.dispatchDirFocused = true
+	choices := m.dispatchDirectories()
+	m.dispatchDirCursor = 7
+	m.dispatchDir.SetValue(choices[7])
+
+	frame := stripANSI(strings.Join(m.dispatchLines(50, 20), "\n"))
+	if !strings.Contains(frame, "▸ "+choices[7]) {
+		t.Errorf("picker cursor scrolled off-screen:\n%s", frame)
+	}
+}
+
+func TestDispatchUsesMentionAsItsOnlyAgentSelector(t *testing.T) {
+	m := modelWithSession(t, session.Claude)
+	press(m, "d")
+	if m.composerAgentFocused {
+		t.Fatal("dispatch composer retained a separate agent focus stop")
+	}
+	m.dispatchTask.SetValue("@codex inspect the change")
+	plain := stripANSI(m.render())
+	if !strings.Contains(plain, "@codex (from task)") || strings.Contains(plain, "[claude]") {
+		t.Errorf("mention did not become the sole visible selector:\n%s", plain)
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !m.dispatchDirFocused {
+		t.Fatal("Tab did not move directly from task to directory")
+	}
+}
+
+func TestDispatchReviewAndFailedLaunchPreserveDraft(t *testing.T) {
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := t.TempDir()
+	m := modelWithSession(t, session.Claude)
+	press(m, "d")
+	m.dispatchTask.SetValue("@codex inspect the change")
+	m.dispatchDir.SetValue(dir)
+	reviewDispatch(m)
+	if m.dispatchReview == nil || m.dispatchReview.agent != session.Codex {
+		t.Fatalf("Enter did not open review with the resolved mention: %#v", m.dispatchReview)
+	}
+	plain := stripANSI(m.render())
+	for _, want := range []string{"REVIEW DISPATCH", "READY TO DISPATCH", "codex", "DIRECTORY", "inspect the change"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("review missing %q:\n%s", want, plain)
+		}
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.dispatchReview != nil || m.dispatchTask.Value() != "@codex inspect the change" || !m.dispatchTask.Focused() {
+		t.Fatal("Esc did not return the intact draft to editing")
+	}
+
+	draft := &dispatchDraft{agent: session.Codex, cwd: dir, task: "inspect the change"}
+	m.dispatchLaunching = draft
+	m.dispatching = false
+	m.filtering = false
+	m.Update(dispatchedMsg{agent: "codex", cwd: dir, err: "tmux failed", draft: draft})
+	if !m.dispatching || m.dispatchLaunching != nil || m.dispatchTask.Value() != draft.task || m.dispatchDir.Value() != dir {
+		t.Fatalf("failed launch lost its draft: dispatching=%v launching=%v task=%q dir=%q", m.dispatching, m.dispatchLaunching != nil, m.dispatchTask.Value(), m.dispatchDir.Value())
+	}
+}
+
+func TestRetryDispatchRestoresAgentTaskAndDirectory(t *testing.T) {
+	m := modelWithSession(t, session.Codex)
+	dir := t.TempDir()
+	m.all[0].Dispatch = &dispatch.Record{
+		ID: "d1", Agent: "codex", Cwd: dir, Prompt: "finish the tests", Status: dispatch.Failed,
+	}
+	m.rebuild()
+	m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+
+	if !m.dispatching || m.dispatchTo != session.Codex {
+		t.Fatalf("retry did not reopen the codex composer: dispatching=%v agent=%s", m.dispatching, m.dispatchTo)
+	}
+	if got := m.dispatchTask.Value(); got != "@codex finish the tests" {
+		t.Errorf("retry task = %q", got)
+	}
+	if got := m.dispatchDir.Value(); got != dir {
+		t.Errorf("retry directory = %q, want %q", got, dir)
+	}
+}
+
+func TestDispatchLogActionIsAvailableOnlyWhenLogExists(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	m := modelWithSession(t, session.Codex)
+	m.all[0].Dispatch = &dispatch.Record{ID: "d1", Agent: "codex", Status: dispatch.Done}
+	m.rebuild()
+	if cmd := m.openDispatchLog(); cmd != nil || !strings.Contains(m.status, "not available") {
+		t.Fatalf("missing log action = cmd:%v status:%q", cmd != nil, m.status)
+	}
+
+	if err := os.MkdirAll(dispatch.Dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dispatch.LogPath("d1"), []byte("run output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "less"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if cmd := m.openDispatchLog(); cmd == nil {
+		t.Fatal("existing dispatch log did not produce a pager command")
 	}
 }
 
@@ -283,6 +402,21 @@ func TestDispatchTypingDoesNotFilterTheList(t *testing.T) {
 	typeInto(m, "zzz nothing matches this")
 	if len(m.view) != 1 {
 		t.Errorf("the list shrank to %d rows while a task was being typed", len(m.view))
+	}
+}
+
+func TestDispatchTaskAcceptsMultipleLines(t *testing.T) {
+	m := modelWithSession(t, session.Claude)
+	press(m, "d")
+	typeInto(m, "inspect the parser")
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	typeInto(m, "then run the tests")
+
+	if got := m.dispatchTask.Value(); got != "inspect the parser\nthen run the tests" {
+		t.Errorf("multiline task = %q", got)
+	}
+	if m.dispatchReview != nil {
+		t.Error("plain Enter submitted instead of inserting a newline")
 	}
 }
 
@@ -387,6 +521,7 @@ func TestDispatchLine(t *testing.T) {
 		{"just started", dispatch.Record{Status: dispatch.Running}, "dispatched · working", "starting…"},
 		{"handed back", dispatch.Record{Status: dispatch.NeedsYou, Pending: "Bash: rm -rf x"}, "dispatched · stopped for you", "Bash: rm -rf x"},
 		{"failed", dispatch.Record{Status: dispatch.Failed, Err: "timed out"}, "dispatched · failed", "timed out"},
+		{"cancelled", dispatch.Record{Status: dispatch.Cancelled}, "dispatched · cancelled", "stopped from orbit"},
 		{"done", dispatch.Record{Status: dispatch.Done}, "dispatched · done", ""},
 	}
 	for _, tt := range tests {
@@ -412,6 +547,25 @@ func TestDetailPaneShowsAHandoff(t *testing.T) {
 
 	out := stripANSI(strings.Join(m.detail(70, 30), "\n"))
 	for _, want := range []string{"stopped for you", "rm -rf build", "delete the build directory", "takes it over"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("detail pane missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDetailPaneShowsDispatchProgressAndResult(t *testing.T) {
+	m := modelWithSession(t, session.Codex)
+	now := time.Now()
+	m.all[0].Dispatch = &dispatch.Record{
+		ID: "d1", Agent: "codex", SessionID: m.all[0].ID, Status: dispatch.Done,
+		Prompt: "finish polish", Activities: []string{"Read README", "Go test ./..."},
+		Result: "All checks pass.", Started: now.Add(-time.Minute), Ended: now, Updated: now,
+	}
+	m.all[0].State = session.YourTurn
+	m.rebuild()
+
+	out := stripANSI(strings.Join(m.detail(70, 35), "\n"))
+	for _, want := range []string{"duration", "timeout", "RECENT ACTIVITY", "Read README", "Go test ./...", "RESULT", "All checks pass."} {
 		if !strings.Contains(out, want) {
 			t.Errorf("detail pane missing %q:\n%s", want, out)
 		}

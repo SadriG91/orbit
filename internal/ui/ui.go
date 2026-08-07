@@ -8,6 +8,7 @@ import (
 
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -152,7 +153,7 @@ type (
 	// The streaming preview: a connection opened (or failed to open), and a
 	// wakeup saying the emulator's screen changed.
 	paneOpenMsg struct {
-		p   *pane.Pane
+		p   livePane
 		err string
 	}
 	paneDirtyMsg struct{}
@@ -208,6 +209,7 @@ type (
 
 type killConfirmation struct {
 	tmux, title, cwd string
+	dispatchID       string
 }
 
 type diagnosticSnapshot struct {
@@ -225,6 +227,7 @@ type Model struct {
 	w, h   int
 
 	filter          textinput.Model
+	dispatchTask    textarea.Model
 	dispatchDir     textinput.Model
 	spin            spinner.Model
 	filtering       bool
@@ -244,6 +247,8 @@ type Model struct {
 	composerAgentFocused bool
 	dispatchDirFocused   bool
 	dispatchDirCursor    int
+	dispatchReview       *dispatchDraft
+	dispatchLaunching    *dispatchDraft
 
 	preview     string
 	previewName string
@@ -266,7 +271,7 @@ type Model struct {
 	embeddedName    string
 	terminalFocused bool
 	terminalZoom    bool
-	terminalWide    bool
+	detailWidth     int // explicit right-pane width; zero uses the responsive default
 	inputQueue      []paneInput
 	inputSending    bool
 	terminalW       int
@@ -331,6 +336,12 @@ func New(cfg config.Config, attachOverride, version string) *Model {
 	dir := textinput.New()
 	dir.Placeholder = "directory"
 	dir.CharLimit = 4096
+	task := textarea.New()
+	task.Prompt = ""
+	task.Placeholder = "Describe the task. Use @codex, @claude, or @copilot at the start to change agent."
+	task.ShowLineNumbers = false
+	task.CharLimit = 4000
+	task.SetHeight(5)
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(cBright)
 	icons := ResolveIconMode(cfg.IconMode())
@@ -339,7 +350,7 @@ func New(cfg config.Config, attachOverride, version string) *Model {
 		icons = IconText
 	}
 	return &Model{
-		ix: session.NewIndex(), filter: ti, dispatchDir: dir, spin: sp, mode: mode, version: version,
+		ix: session.NewIndex(), filter: ti, dispatchTask: task, dispatchDir: dir, spin: sp, mode: mode, version: version,
 		cfg: cfg, icons: icons, noColor: noColor, reducedMotion: os.Getenv("ORBIT_REDUCED_MOTION") != "", sort: session.ParseSortMode(cfg.Sort), group: parseGroupMode(cfg.Group, cfg.GroupBy),
 		summaries: map[string]summary.Record{}, pending: map[string]time.Time{},
 		notify:   NewNotifier(cfg.Notify),
@@ -486,32 +497,76 @@ func scan(gen int, ix *session.Index) tea.Msg {
 	// lookup per session: there are a handful of dispatches and hundreds of
 	// sessions. Joining here is the UI's job — it is the layer allowed to know
 	// about both an agent and the machinery around it.
-	dispatches := dispatch.Active()
+	records := dispatch.Records()
+	dispatches := map[string]*dispatch.Record{}
+	standalone := map[string]*dispatch.Record{}
+	for _, r := range records {
+		if r.SessionID == "" {
+			standalone[r.ID] = r
+			continue
+		}
+		dispatches[dispatch.Key(r.Agent, r.SessionID)] = r
+	}
+	// Only the newest record for a repeatedly dispatched conversation speaks
+	// for it. A record with no conversation id is independently visible.
+	for _, r := range dispatches {
+		standalone[r.ID] = r
+	}
+
 	byID := map[string]*session.Session{}
+	claimedDispatch := map[string]bool{}
 	for _, s := range sessions {
 		// Sessions come from a cache and are reused across ticks, so last
 		// tick's tmux link has to be cleared or a killed session stays "live".
 		s.Tmux = nil
 		s.Dispatch = dispatches[dispatch.Key(s.Agent.String(), s.ID)]
-		byID[s.ID] = s
+		if s.Dispatch != nil {
+			claimedDispatch[s.Dispatch.ID] = true
+		}
+		byID[dispatch.Key(s.Agent.String(), s.ID)] = s
 	}
 
 	claimed := map[string]bool{}
-	var unlinked []*tmux.Session
-	for _, t := range tmux.List() {
-		if t.SessionID == "" {
-			unlinked = append(unlinked, t)
-			continue
-		}
-		if s, ok := byID[t.SessionID]; ok {
-			s.Tmux = t
-			claimed[s.ID] = true
-			if want := s.TabTitle(); want != t.Title {
-				tmux.Retitle(t.Name, want)
+	claimedTmux := map[string]bool{}
+	tmuxSessions := tmux.List()
+	tmuxByName := make(map[string]*tmux.Session, len(tmuxSessions))
+	for _, t := range tmuxSessions {
+		tmuxByName[t.Name] = t
+		if t.SessionID != "" {
+			if s, ok := byID[dispatch.Key(t.Agent, t.SessionID)]; ok {
+				s.Tmux = t
+				claimed[s.ID] = true
+				claimedTmux[t.Name] = true
+				if want := s.TabTitle(); want != t.Title {
+					tmux.Retitle(t.Name, want)
+				}
 			}
 		}
 	}
-	for _, t := range unlinked {
+
+	// A dispatch exists before its transcript does. Keep that record as a real
+	// row and attach its runner by the tmux name orbit wrote at launch. This
+	// also keeps start failures visible when there is no tmux session at all.
+	for _, r := range standalone {
+		if claimedDispatch[r.ID] {
+			continue
+		}
+		s := dispatchOnlySession(r)
+		if s == nil {
+			continue
+		}
+		if t := tmuxByName[r.Tmux]; t != nil && !claimedTmux[t.Name] {
+			s.Tmux = t
+			claimed[s.ID] = true
+			claimedTmux[t.Name] = true
+		}
+		sessions = append(sessions, s)
+	}
+
+	for _, t := range tmuxSessions {
+		if claimedTmux[t.Name] {
+			continue
+		}
 		best := unlinkedCandidate(t, sessions, claimed)
 		if best != nil {
 			best.Tmux = t
@@ -685,20 +740,18 @@ func save(what string, write func() error) tea.Cmd {
 	}
 }
 
-// resetPrompt puts the shared text input back to being the quick filter.
-//
-// The task textinput is shared by the quick filter, full-text search and
-// dispatch composer. Each sets its own prompt, placeholder and length limit. Undoing
-// that in one place is what stops the next `/` inheriting the last dispatch's
-// 4000-character budget and the word "task" as its placeholder.
+// resetPrompt closes any composer and puts the ordinary filter input back in
+// its neutral state.
 func (m *Model) resetPrompt() {
 	m.searching = false
 	m.dispatching = false
+	m.dispatchReview = nil
 	m.newing = false
 	m.composerAgentFocused = false
 	m.dispatchDirFocused = false
 	m.dispatchDirCursor = -1
 	m.dispatchDir.Blur()
+	m.dispatchTask.Blur()
 	m.filter.Prompt = "/"
 	m.filter.Placeholder = "filter"
 	m.filter.CharLimit = 80
@@ -812,7 +865,7 @@ const maxSummaryJobs = 2
 // turn is in flight — the transcript is still being written, and whatever it
 // says right now is about to change.
 func (m *Model) shouldAutoSummarise(s *session.Session) bool {
-	if pendingSession(s) || !m.cfg.Summary.Enabled || !m.cfg.Summary.Auto {
+	if pendingSession(s) || s.DispatchOnly || !m.cfg.Summary.Enabled || !m.cfg.Summary.Auto {
 		return false
 	}
 	if s.State == session.Working || s.State == session.NeedsApproval {
@@ -925,6 +978,10 @@ func (m *Model) summarise(s *session.Session) tea.Cmd {
 		m.say("send the first prompt before summarising this session")
 		return nil
 	}
+	if s.DispatchOnly {
+		m.say("the dispatch has not created a transcript to summarise yet")
+		return nil
+	}
 	if !m.cfg.Summary.Enabled {
 		return func() tea.Msg { return statusMsg("summaries are disabled in config") }
 	}
@@ -963,7 +1020,7 @@ func (m *Model) summaryElapsed(id string) (time.Duration, bool) {
 // rather than time passed.
 func (m *Model) summaryCoverage() (done, total, inflight int) {
 	for _, s := range m.view {
-		if pendingSession(s) {
+		if pendingSession(s) || s.DispatchOnly {
 			continue
 		}
 		total++
@@ -1177,6 +1234,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.say("live preview unavailable, polling instead: " + msg.err)
 			return m, nil
 		}
+		// capture normally permits only one dial at a time. Still close any
+		// existing stream here so this ownership transfer stays safe if that
+		// distant scheduling invariant ever changes.
+		if m.stream != nil {
+			_ = m.stream.Close()
+		}
 		m.stream = msg.p
 		if m.embedded != "" && msg.p.Session() == m.embedded {
 			return m, tea.Batch(waitForPaneCmd(msg.p), m.resizeEmbeddedCmd())
@@ -1296,9 +1359,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// without a terminal; the row appears in the list within a tick or two
 		// and the live preview shows it working if you sit on it.
 		if msg.err != "" {
+			m.dispatchLaunching = nil
+			if msg.draft != nil {
+				m.beginComposer(false)
+				m.dispatchTo = msg.draft.agent
+				m.dispatchTask.SetValue(msg.draft.task)
+				m.dispatchDir.SetValue(msg.draft.cwd)
+			}
 			m.say("dispatch failed: " + msg.err)
 			return m, nil
 		}
+		m.dispatchLaunching = nil
+		m.dispatchTask.SetValue("")
+		m.dispatchDir.SetValue("")
+		m.resetPrompt()
 		m.say(msg.agent + " is working on it in " + msg.cwd)
 		return m, m.refreshCmd()
 
@@ -1369,15 +1443,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.preparing != nil {
 				return m, nil
 			}
+			if delta, ok := detailResizeDelta(msg); ok {
+				return m, m.adjustDetailWidth(delta)
+			}
 			switch msg.String() {
 			case "tab", "ctrl+g":
 				return m, m.leaveEmbedded()
 			case "ctrl+f":
 				m.terminalZoom = !m.terminalZoom
-				m.terminalW, m.terminalH = 0, 0
-				return m, m.resizeEmbeddedCmd()
-			case "ctrl+e":
-				m.terminalWide = !m.terminalWide
 				m.terminalW, m.terminalH = 0, 0
 				return m, m.resizeEmbeddedCmd()
 			}
@@ -1386,6 +1459,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.queuePaneInput(input)
 			}
 			return m, nil
+		}
+		if m.dispatchReview != nil {
+			return m, m.dispatchReviewKey(msg)
 		}
 		if m.dispatching {
 			return m, m.dispatchKey(msg)
@@ -1469,6 +1545,9 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
+	}
+	if delta, ok := detailResizeDelta(msg); ok {
+		return m, m.adjustDetailWidth(delta)
 	}
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -1583,10 +1662,61 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.beginComposer(true)
 		return m, textinput.Blink
 	case "d":
+		if m.dispatchLaunching != nil {
+			m.say("a dispatch is already launching")
+			return m, nil
+		}
 		m.beginComposer(false)
 		return m, textinput.Blink
+	case "R":
+		return m, m.retryDispatch()
+	case "L":
+		return m, m.openDispatchLog()
 	}
 	return m, nil
+}
+
+const detailResizeStep = 5
+
+// detailResizeDelta requires both Ctrl and Alt. Ctrl alone remains available
+// to terminal-emulator font shortcuts, while unmodified punctuation continues
+// to reach the focused agent input. Shift is allowed because + commonly shares
+// the = key.
+func detailResizeDelta(msg tea.KeyPressMsg) (int, bool) {
+	if !msg.Mod.Contains(tea.ModCtrl) || !msg.Mod.Contains(tea.ModAlt) ||
+		msg.Mod&(tea.ModMeta|tea.ModSuper|tea.ModHyper) != 0 {
+		return 0, false
+	}
+	switch msg.Text {
+	case "-":
+		return -detailResizeStep, true
+	case "+":
+		return detailResizeStep, true
+	case "_", "=":
+		return 0, false
+	}
+	switch msg.Code {
+	case '-':
+		return -detailResizeStep, true
+	case '+':
+		return detailResizeStep, true
+	}
+	return 0, false
+}
+
+// adjustDetailWidth follows Darklens' width override: it starts from the
+// rendered split, clamps both panes, then resizes any mounted terminal to the
+// exact content dimensions used by the next frame.
+func (m *Model) adjustDetailWidth(delta int) tea.Cmd {
+	_, current, _ := m.dashboardPaneSizes()
+	maxDetail := m.w - minSessionPaneWidth - 1
+	if current == 0 || maxDetail < minDetailPaneWidth {
+		m.say("terminal is too narrow to resize the detail pane")
+		return nil
+	}
+	m.detailWidth = min(max(current+delta, minDetailPaneWidth), maxDetail)
+	m.terminalW, m.terminalH = 0, 0
+	return m.resizeEmbeddedCmd()
 }
 
 // open attaches the selected session, starting it first if it isn't running.
@@ -1610,6 +1740,14 @@ func (m *Model) open(mode attachMode) tea.Cmd {
 			focus = focusTarget{id: s.Tmux.TabID, title: s.TabTitle()}
 		}
 		return m.attach(s.Tmux.Name, s.Cwd, focus, mode)
+	}
+	if s.DispatchOnly {
+		if s.Dispatch != nil && s.Dispatch.Status == dispatch.Failed {
+			m.say("this dispatch failed before it created a resumable session")
+		} else {
+			m.say("the dispatched session is not available yet")
+		}
+		return nil
 	}
 	m.say("resuming " + s.Agent.String() + "…")
 	sess := s
@@ -1720,6 +1858,9 @@ func (m *Model) requestKill() tea.Cmd {
 		return func() tea.Msg { return statusMsg("nothing running for that session") }
 	}
 	m.killConfirm = &killConfirmation{tmux: s.Tmux.Name, title: s.Name(), cwd: s.Cwd}
+	if s.Dispatch != nil && s.Dispatch.Live() && s.Dispatch.Tmux == s.Tmux.Name {
+		m.killConfirm.dispatchID = s.Dispatch.ID
+	}
 	return nil
 }
 
@@ -1733,6 +1874,11 @@ func (m *Model) confirmKill() tea.Cmd {
 	return func() tea.Msg {
 		if err := tmux.Kill(prompt.tmux); err != nil {
 			return statusMsg("kill failed: " + err.Error())
+		}
+		if prompt.dispatchID != "" {
+			if err := dispatch.MarkCancelled(prompt.dispatchID); err != nil {
+				return statusMsg("killed " + prompt.title + ", but could not mark dispatch cancelled: " + err.Error())
+			}
 		}
 		return statusMsg("killed " + prompt.title)
 	}

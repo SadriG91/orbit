@@ -426,6 +426,76 @@ func TestCloseRemovesTheControlClient(t *testing.T) {
 	}
 }
 
+// The leak is not "Close forgets to clean up" — it is "the remote end went
+// away first, so shutdown ran, and Close then had nothing left to do." Count
+// this process's descriptors rather than global PTYs so unrelated terminals
+// cannot perturb the result.
+func TestRemoteExitDoesNotLeakPTYs(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	if err := tmux.InstallConf(); err != nil {
+		t.Fatalf("InstallConf: %v", err)
+	}
+	cwd, _ := os.Getwd()
+
+	baseline := -1
+	for i := 0; i < 5; i++ {
+		name := "orbit-leak-" + strconv.Itoa(i)
+		_ = tmux.Kill(name)
+		if err := tmux.Spawn(name, cwd, "true", "leak · "+name, "codex", ""); err != nil {
+			t.Fatalf("Spawn: %v", err)
+		}
+		p, err := pane.Open(name)
+		if err != nil {
+			_ = tmux.Kill(name)
+			t.Fatalf("Open: %v", err)
+		}
+		if err := tmux.Kill(name); err != nil {
+			_ = p.Close()
+			t.Fatalf("Kill: %v", err)
+		}
+		select {
+		case <-p.Done():
+		case <-time.After(10 * time.Second):
+			_ = p.Close()
+			t.Fatal("pane never reported Done after the session was killed")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		if i == 0 {
+			baseline = openFDs(t)
+			continue
+		}
+		if got := openFDs(t); got > baseline {
+			t.Fatalf("round %d: %d descriptors open, baseline %d — PTYs are leaking", i, got, baseline)
+		}
+	}
+}
+
+func openFDs(t *testing.T) int {
+	t.Helper()
+	path := "/dev/fd"
+	if _, err := os.Stat(path); err != nil {
+		path = "/proc/self/fd"
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		t.Skipf("cannot count descriptors: %v", err)
+	}
+	defer dir.Close()
+	// Readdirnames deliberately avoids statting the pseudo-files. On macOS,
+	// os.ReadDir uses fstatat and /dev/fd can return EBADF for a descriptor
+	// which closes while the directory is being traversed.
+	names, err := dir.Readdirnames(-1)
+	if err != nil {
+		t.Skipf("cannot count descriptors: %v", err)
+	}
+	return len(names)
+}
+
 func controlClientCount(t *testing.T) int {
 	t.Helper()
 	out, err := exec.Command("tmux", tmux.Args("list-clients", "-F", "#{client_control_mode}")...).Output()
