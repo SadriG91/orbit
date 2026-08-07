@@ -61,6 +61,31 @@ func TestLoadRejectsRubbish(t *testing.T) {
 	}
 }
 
+func TestMarkCancelledClearsTransientState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	save(t, &Record{
+		ID: "d1", Agent: "codex", Status: Running, Started: time.Now(),
+		Activity: "running tests", Pending: "approval", Err: "old error",
+	})
+
+	if err := MarkCancelled("d1"); err != nil {
+		t.Fatalf("MarkCancelled: %v", err)
+	}
+	r, ok := Load("d1")
+	if !ok {
+		t.Fatal("cancelled record disappeared")
+	}
+	if r.Status != Cancelled || r.Ended.IsZero() {
+		t.Errorf("cancelled record = %+v", r)
+	}
+	if r.Activity != "" || r.Pending != "" || r.Err != "" {
+		t.Errorf("cancelled record kept transient state: %+v", r)
+	}
+	if err := MarkCancelled("missing"); err == nil {
+		t.Error("MarkCancelled accepted a missing dispatch")
+	}
+}
+
 func TestActiveKeysBySession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	save(t, &Record{ID: "d1", Agent: "claude", SessionID: "s1", Status: Done, Started: time.Now()})
@@ -79,6 +104,9 @@ func TestActiveKeysBySession(t *testing.T) {
 	}
 	if r := got[Key("codex", "s1")]; r == nil || r.ID != "d2" {
 		t.Errorf("codex/s1 = %v, want d2", r)
+	}
+	if records := Records(); len(records) != 3 {
+		t.Errorf("Records returned %d records, want the unlinked codex launch too", len(records))
 	}
 }
 

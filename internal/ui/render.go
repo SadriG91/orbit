@@ -132,13 +132,19 @@ func (m *Model) render() string {
 			label += " · grouped by " + m.group.String()
 		}
 	}
-	label = focusPaneLabel(label, !m.terminalFocused && !m.dispatching && !m.newing && m.preparing == nil)
+	label = focusPaneLabel(label, !m.terminalFocused && !m.dispatching && m.dispatchReview == nil && m.dispatchLaunching == nil && !m.newing && m.preparing == nil)
 	body := titledPane(label, m.list(listBoxW-chrome, bodyH-3), listBoxW, bodyH)
 
 	if detBoxW > 0 {
 		label := "detail"
 		var right []string
-		if m.dispatching {
+		if m.dispatchReview != nil {
+			label = focusPaneLabel("review dispatch", true)
+			right = m.dispatchReviewLines(detBoxW-chrome, bodyH-3)
+		} else if m.dispatchLaunching != nil {
+			label = "… launching dispatch"
+			right = m.dispatchLaunchingLines(detBoxW-chrome, bodyH-3)
+		} else if m.dispatching {
 			label = focusPaneLabel("dispatch task", true)
 			right = m.dispatchLines(detBoxW-chrome, bodyH-3)
 		} else if m.newing {
@@ -246,17 +252,23 @@ func (m *Model) preparingLines(w, h int) []string {
 // dashboardPaneSizes is the single source of truth for both rendering and the
 // tmux client size. If those disagree, the agent paints for one geometry and
 // Orbit clips it into another.
+const (
+	minSessionPaneWidth = 28
+	minDetailPaneWidth  = 30
+)
+
 func (m *Model) dashboardPaneSizes() (listW, detailW, bodyH int) {
 	bodyH = m.h - lipgloss.Height(m.header()) - lipgloss.Height(m.footer())
 	if bodyH < 5 {
 		bodyH = 5
 	}
 	listW = min(66, max(38, m.w*46/100))
-	if m.terminalWide && m.embedded != "" {
-		listW = max(28, m.w*30/100)
-	}
 	detailW = m.w - listW - 1
-	if detailW < 30 {
+	if m.detailWidth > 0 && m.w >= minSessionPaneWidth+minDetailPaneWidth+1 {
+		detailW = min(max(m.detailWidth, minDetailPaneWidth), m.w-minSessionPaneWidth-1)
+		listW = m.w - detailW - 1
+	}
+	if detailW < minDetailPaneWidth {
 		return m.w, 0, bodyH
 	}
 	return listW, detailW, bodyH
@@ -264,41 +276,42 @@ func (m *Model) dashboardPaneSizes() (listW, detailW, bodyH int) {
 
 func (m *Model) dispatchLines(w, h int) []string {
 	contentW := max(12, w)
-	m.filter.SetWidth(contentW)
+	m.dispatchTask.SetWidth(contentW)
+	m.dispatchTask.SetHeight(min(5, max(3, h-12)))
 	m.dispatchDir.SetWidth(contentW)
 
-	ag, _, err := parseDispatchPrompt(m.filter.Value(), m.dispatchTo)
+	ag, _, err := parseDispatchPrompt(m.dispatchTask.Value(), m.dispatchTo)
 	agent := "@" + m.dispatchTo.String() + " (default)"
-	if err == nil && strings.HasPrefix(strings.TrimSpace(m.filter.Value()), "@") {
+	if err == nil && strings.HasPrefix(strings.TrimSpace(m.dispatchTask.Value()), "@") {
 		agent = "@" + ag.String() + " (from task)"
 	}
-	taskLabel, agentLabel, dirLabel := "TASK · FOCUSED", "AGENT", "DIRECTORY"
-	if m.composerAgentFocused {
-		taskLabel, agentLabel = "TASK", "AGENT · FOCUSED"
-	}
+	taskLabel, dirLabel := "TASK · FOCUSED", "DIRECTORY"
 	if m.dispatchDirFocused {
-		taskLabel, agentLabel, dirLabel = "TASK", "AGENT", "DIRECTORY · FOCUSED"
+		taskLabel, dirLabel = "TASK", "DIRECTORY · FOCUSED"
 	}
 
 	lines := []string{
-		paneLabel.Render(agentLabel) + "  " + agentStyle(ag).Render(agent),
-		m.agentSelector(contentW),
-		sDim.Render(format.Truncate("Use @claude, @codex, or @copilot at the start of the task to override it.", contentW)),
+		paneLabel.Render("AGENT") + "  " + agentStyle(ag).Render(agent),
+		sDim.Render(format.Truncate("Prefix the task with @claude, @codex, or @copilot to change it.", contentW)),
 		"",
 		paneLabel.Render(taskLabel),
-		m.filter.View(),
-		"",
-		paneLabel.Render(dirLabel),
-		m.dispatchDir.View(),
 	}
+	lines = append(lines, strings.Split(m.dispatchTask.View(), "\n")...)
+	lines = append(lines, "", paneLabel.Render(dirLabel), m.dispatchDir.View())
 	if m.dispatchDirFocused {
 		choices := m.dispatchDirectories()
 		room := max(0, min(5, h-len(lines)-3))
 		if room > 0 && len(choices) > 0 {
 			lines = append(lines, sDim.Render("recent project directories"))
-			for i, dir := range choices[:min(room, len(choices))] {
+			start := 0
+			if m.dispatchDirCursor >= room {
+				start = m.dispatchDirCursor - room + 1
+			}
+			end := min(start+room, len(choices))
+			for i, dir := range choices[start:end] {
+				actual := start + i
 				marker, style := "  ", sMid
-				if i == m.dispatchDirCursor {
+				if actual == m.dispatchDirCursor {
 					marker, style = "▸ ", sNameOn
 				}
 				lines = append(lines, marker+style.Render(format.Truncate(dir, max(8, contentW-2))))
@@ -311,6 +324,58 @@ func (m *Model) dispatchLines(w, h int) []string {
 	} else {
 		lines = append(lines, sDim.Render(format.Truncate("Relative paths use Orbit's working directory; ~ is supported.", contentW)))
 	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lines
+}
+
+func (m *Model) dispatchReviewLines(w, h int) []string {
+	d := m.dispatchReview
+	if d == nil {
+		return nil
+	}
+	policy := "uses your agent settings"
+	if d.agent == session.Claude && m.cfg.Dispatch.PermissionMode != "" {
+		policy = "permission mode: " + m.cfg.Dispatch.PermissionMode
+	} else if d.agent == session.Copilot {
+		policy = "all tools allowed"
+	}
+	lines := []string{
+		paneLabel.Render("READY TO DISPATCH"),
+		"",
+		paneLabel.Render("AGENT") + "  " + agentStyle(d.agent).Render(d.agent.String()),
+		paneLabel.Render("DIRECTORY") + "  " + sMid.Render(format.Truncate(d.cwd, max(8, w-12))),
+		paneLabel.Render("TIMEOUT") + "  " + sMid.Render(m.cfg.Dispatch.Timeout),
+		paneLabel.Render("POLICY") + "  " + sMid.Render(format.Truncate(policy, max(8, w-9))),
+		"",
+		paneLabel.Render("TASK"),
+	}
+	for _, line := range wrap(d.task, w) {
+		lines = append(lines, sName.Render(line))
+	}
+	lines = append(lines, "", sDim.Render("Enter dispatches · Esc returns to editing"))
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return lines
+}
+
+func (m *Model) dispatchLaunchingLines(w, h int) []string {
+	d := m.dispatchLaunching
+	if d == nil {
+		return nil
+	}
+	lines := []string{
+		paneLabel.Render(m.activityMark() + " STARTING " + strings.ToUpper(d.agent.String())),
+		"",
+		sMid.Render(format.Truncate(d.cwd, w)),
+		"",
+	}
+	for _, line := range wrap(d.task, w) {
+		lines = append(lines, sName.Render(line))
+	}
+	lines = append(lines, "", sDim.Render("The dispatch will appear in Sessions when its runner is ready."))
 	if len(lines) > h {
 		lines = lines[:h]
 	}
@@ -349,9 +414,15 @@ func (m *Model) newSessionLines(w, h int) []string {
 		room := max(0, min(5, h-len(lines)-3))
 		if room > 0 && len(choices) > 0 {
 			lines = append(lines, sDim.Render("recent project directories"))
-			for i, dir := range choices[:min(room, len(choices))] {
+			start := 0
+			if m.dispatchDirCursor >= room {
+				start = m.dispatchDirCursor - room + 1
+			}
+			end := min(start+room, len(choices))
+			for i, dir := range choices[start:end] {
+				actual := start + i
 				marker, style := "  ", sMid
-				if i == m.dispatchDirCursor {
+				if actual == m.dispatchDirCursor {
 					marker, style = "▸ ", sNameOn
 				}
 				lines = append(lines, marker+style.Render(format.Truncate(dir, max(8, contentW-2))))
@@ -425,7 +496,7 @@ func (m *Model) renderEmbedded() string {
 
 	screen := strings.Join(m.terminalLines(w, h), "\n")
 	body := lipgloss.NewStyle().Width(w).Height(h).MaxWidth(w).MaxHeight(h).Render(screen)
-	helpText := "  INPUT → TERMINAL   Tab/Ctrl+g sessions   Ctrl+f split   Ctrl+e width"
+	helpText := "  INPUT → TERMINAL   Tab/Ctrl+g sessions   Ctrl+f split   Ctrl+Alt+-/+ width"
 	if m.stream != nil && m.stream.Scrolled() {
 		helpText = "  SCROLLBACK · wheel to browse · any key returns to live · Tab sessions"
 	}
@@ -577,7 +648,7 @@ func (m *Model) header() string {
 		tagline.Render(format.Itoa(len(m.view))+" of "+format.Itoa(len(m.all))+" shown") +
 			tagline.Render("  ·  ") + strings.Join(legend, tagline.Render(" · ")),
 	}
-	if !m.dispatching && !m.newing && (m.filtering || m.filter.Value() != "") {
+	if !m.dispatching && m.dispatchReview == nil && !m.newing && (m.filtering || m.filter.Value() != "") {
 		stats = append(stats, m.filter.View())
 	}
 
@@ -617,7 +688,7 @@ func (m *Model) header() string {
 // or footer and do not duplicate the same message here.
 func (m *Model) headerNotice() (string, lipgloss.Style) {
 	if m.status == "" || (!m.statusSticky && time.Now().After(m.statusUntil)) || m.updating ||
-		m.preparing != nil || m.dispatching || m.newing || m.filtering {
+		m.preparing != nil || m.dispatching || m.dispatchReview != nil || m.dispatchLaunching != nil || m.newing || m.filtering {
 		return "", lipgloss.Style{}
 	}
 	style := sHead
@@ -861,17 +932,48 @@ func (m *Model) detail(w, h int) []string {
 				style = sHit
 			case dispatch.Failed:
 				style = sErr
+			case dispatch.Cancelled:
+				style = sDim
 			}
 			for _, l := range wrap(format.Clean(detail), w-2) {
 				add("  " + style.Render(l))
 			}
 		}
+		if !d.Started.IsZero() {
+			end, kind := time.Now(), "elapsed"
+			if !d.Live() && !d.Ended.IsZero() {
+				end, kind = d.Ended, "duration"
+			}
+			meta := kind + " " + compactDuration(end.Sub(d.Started))
+			if m.cfg.Dispatch.Timeout != "" {
+				meta += " · timeout " + m.cfg.Dispatch.Timeout
+			}
+			if !d.Updated.IsZero() {
+				meta += " · updated " + format.RelTime(d.Updated) + " ago"
+			}
+			add("  " + sDim.Render(format.Truncate(meta, w-2)))
+		}
 		for _, l := range wrap(format.Clean("⇢ "+d.Prompt), w-2) {
 			add("  " + sDim.Render(l))
+		}
+		if len(d.Activities) > 0 {
+			add("  " + paneLabel.Render("RECENT ACTIVITY"))
+			for _, activity := range d.Activities {
+				for _, l := range wrap(format.Clean("• "+activity), w-4) {
+					add("    " + sMid.Render(l))
+				}
+			}
+		}
+		if d.Result != "" {
+			add("  " + paneLabel.Render("RESULT"))
+			for _, l := range wrap(format.Clean(d.Result), w-4) {
+				add("    " + sName.Render(l))
+			}
 		}
 		if d.Status == dispatch.NeedsYou {
 			add("  " + sMid.Render("⏎ takes it over where it stopped"))
 		}
+		add("  " + sDim.Render("L opens the full dispatch log"))
 		add("")
 	}
 
@@ -924,6 +1026,12 @@ func (m *Model) detail(w, h int) []string {
 		for _, l := range lines {
 			add("  " + sMid.Render(format.Truncate(format.Clean(l), w-2)))
 		}
+	} else if s.Tmux == nil && s.DispatchOnly {
+		message := "The agent has not created a resumable transcript yet."
+		if s.Dispatch != nil && s.Dispatch.Status == dispatch.Failed {
+			message = "No resumable transcript was created. Retry this dispatch with R."
+		}
+		add(sDim.Render(message), "")
 	} else if s.Tmux == nil {
 		add(paneLabel.Render("▸ ⏎ resumes with"))
 		add("  " + sMid.Render(format.Truncate(s.Agent.ResumeCmd(s.ID), w-2)))
@@ -931,6 +1039,13 @@ func (m *Model) detail(w, h int) []string {
 		add(sDim.Render(format.Truncate("transcript: "+s.Path, w)))
 	}
 	return out
+}
+
+func compactDuration(d time.Duration) string {
+	if d < time.Second {
+		return "<1s"
+	}
+	return d.Round(time.Second).String()
 }
 
 func stateColor(s session.State) color.Color {
@@ -964,9 +1079,15 @@ func (m *Model) footer() string {
 		return " " + sHead.Render(m.activityMark()+" preparing "+p.agent.String()+" live pane") +
 			sDim.Render("  ·  "+format.Itoa(elapsed)+"s  ·  it will open automatically")
 	}
+	if m.dispatchReview != nil {
+		return m.footerLine([][2]string{{"⏎", "dispatch"}, {"esc", "edit"}})
+	}
+	if m.dispatchLaunching != nil {
+		return " " + sHead.Render(m.activityMark()+" launching dispatch…")
+	}
 	if m.dispatching {
 		return m.footerLine([][2]string{
-			{"tab", "switch field"}, {"↑↓", "directory"}, {"⏎", "accept"}, {"esc", "cancel"},
+			{"tab", "task / directory"}, {"⏎", "new line"}, {"ctrl+⏎", "review"}, {"esc", "cancel"},
 		})
 	}
 	if m.newing {
@@ -978,20 +1099,22 @@ func (m *Model) footer() string {
 		return m.footerLine([][2]string{{"?", "close shortcuts"}, {"esc", "close"}})
 	}
 	if m.terminalFocused && m.embedded != "" {
-		mode := "widen"
-		if m.terminalWide {
-			mode = "normal width"
-		}
 		zoom := "full screen"
 		if m.terminalZoom {
 			zoom = "split view"
 		}
-		keys := [][2]string{{"tab", "sessions"}, {"ctrl+f", zoom}, {"ctrl+e", mode}}
+		keys := [][2]string{{"tab", "sessions"}, {"ctrl+f", zoom}, {"ctrl+alt+-/+", "resize"}}
 		return m.footerLine(keys)
 	}
 	keys := [][2]string{
-		{"⏎", "attach"}, {"tab", "drive"}, {"?", "shortcuts"}, {"/", "filter"},
+		{"⏎", "attach"}, {"tab", "drive"}, {"?", "shortcuts"}, {"ctrl+alt+-/+", "resize"}, {"/", "filter"},
 		{"n", "new"}, {"d", "dispatch"},
+	}
+	if s := m.sel(); s != nil && s.Dispatch != nil && !s.Dispatch.Live() {
+		keys = append(keys, [2]string{"R", "retry"})
+	}
+	if s := m.sel(); s != nil && s.Dispatch != nil {
+		keys = append(keys, [2]string{"L", "log"})
 	}
 	return m.footerLine(keys)
 }
@@ -1122,17 +1245,19 @@ func (m *Model) shortcutHelp(w, h int) []string {
 		pair{binding{"⏎", "attach"}, binding{"tab", "focus live pane"}},
 		pair{binding{"i", "attach here"}, binding{"t", "open in new tab"}},
 		pair{binding{"w", "open in new window"}, binding{"n", "new session"}},
-		pair{binding{"d", "dispatch task"}, binding{"x", "confirm kill session"}},
+		pair{binding{"d", "dispatch task"}, binding{"R", "retry selected dispatch"}},
+		pair{binding{"L", "open dispatch log"}, binding{"x", "confirm kill session"}},
 	)
 	section("FIND & ORGANIZE",
 		pair{binding{"/", "filter list"}, binding{"f", "search transcripts"}},
 		pair{binding{"o / p", "sort / group"}, binding{"a", "all / recent"}},
-		pair{binding{"s / S", "summary / visible"}, binding{"r", "refresh"}},
+		pair{binding{"ctrl+alt+- / +", "resize detail pane"}, binding{"r", "refresh"}},
+		pair{binding{"s / S", "summary / visible"}, binding{"?", "shortcut help"}},
 	)
 	section("LIVE PANE & APP",
 		pair{binding{"tab / ctrl+g", "sessions"}, binding{"ctrl+f", "full screen"}},
-		pair{binding{"ctrl+e", "toggle width"}, binding{"D", "diagnostics"}},
-		pair{binding{"esc", "dismiss error"}, binding{"q", "quit"}},
+		pair{binding{"D", "diagnostics"}, binding{"esc", "dismiss error"}},
+		pair{binding{"q", "quit"}, binding{"ctrl+c", "quit"}},
 	)
 	if len(lines) > h {
 		lines = lines[:max(0, h)]

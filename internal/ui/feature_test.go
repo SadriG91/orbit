@@ -305,6 +305,23 @@ func TestStalePollDoesNotOverwriteTheStream(t *testing.T) {
 	}
 }
 
+func TestPaneOpenClosesAnUnexpectedPreviousStream(t *testing.T) {
+	m := New(config.Config{}, "", "test")
+	old := newFakePane("cl-old")
+	replacement := newFakePane("cl-new")
+	m.stream = old
+	m.streamOpening = true
+
+	m.Update(paneOpenMsg{p: replacement})
+
+	if !old.closed {
+		t.Error("paneOpenMsg orphaned the previous stream")
+	}
+	if m.stream != replacement {
+		t.Error("paneOpenMsg did not install the replacement stream")
+	}
+}
+
 // Moving from a live row to a dormant transcript clears the cache but leaves
 // the one streaming client where it is. Returning to that live row must copy
 // its existing screen back immediately: an idle agent may never emit another

@@ -7,12 +7,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/sadrig91/orbit/internal/dispatch"
+	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/pane"
 	"github.com/sadrig91/orbit/internal/session"
 	"github.com/sadrig91/orbit/internal/tmux"
 )
 
 const pendingIDPrefix = "tmux:"
+const dispatchIDPrefix = "dispatch:"
 
 type drivePreparation struct {
 	id, cwd, title string
@@ -38,6 +41,29 @@ type paneInput struct {
 
 func pendingSession(s *session.Session) bool {
 	return s != nil && strings.HasPrefix(s.ID, pendingIDPrefix)
+}
+
+func dispatchOnlySession(r *dispatch.Record) *session.Session {
+	var agent session.Agent
+	switch r.Agent {
+	case "claude":
+		agent = session.Claude
+	case "codex":
+		agent = session.Codex
+	case "copilot":
+		agent = session.Copilot
+	default:
+		return nil
+	}
+	modified := r.Updated
+	if modified.IsZero() {
+		modified = r.Started
+	}
+	return &session.Session{
+		Agent: agent, ID: dispatchIDPrefix + r.ID, Cwd: r.Cwd,
+		Title: format.FirstLine(r.Prompt), Modified: modified,
+		Dispatch: r, DispatchOnly: true,
+	}
 }
 
 func pendingFromTmux(t *tmux.Session) *session.Session {

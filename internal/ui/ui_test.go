@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/sadrig91/orbit/internal/config"
+	"github.com/sadrig91/orbit/internal/dispatch"
 	"github.com/sadrig91/orbit/internal/format"
 	"github.com/sadrig91/orbit/internal/search"
 	"github.com/sadrig91/orbit/internal/session"
@@ -278,6 +279,7 @@ func TestKillRequiresConfirmationAndPinsTheTarget(t *testing.T) {
 		{
 			Agent: session.Claude, ID: "first", Cwd: "/work/first", Title: "First live session",
 			Modified: time.Now(), Tmux: &tmux.Session{Name: "cl-first"},
+			Dispatch: &dispatch.Record{ID: "dispatch-first", Status: dispatch.Running, Tmux: "cl-first"},
 		},
 		{
 			Agent: session.Codex, ID: "second", Cwd: "/work/second", Title: "Second live session",
@@ -292,6 +294,9 @@ func TestKillRequiresConfirmationAndPinsTheTarget(t *testing.T) {
 	}
 	if m.killConfirm.tmux != "cl-first" {
 		t.Fatalf("confirmation target = %q, want cl-first", m.killConfirm.tmux)
+	}
+	if m.killConfirm.dispatchID != "dispatch-first" {
+		t.Fatalf("confirmation dispatch = %q, want dispatch-first", m.killConfirm.dispatchID)
 	}
 	frame := stripANSI(m.render())
 	for _, want := range []string{"CONFIRM KILL", "INPUT LOCKED", "KILL LIVE SESSION?", "First live session", "/work/first", "transcript and summary will be kept", "kill session", "cancel"} {

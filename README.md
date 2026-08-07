@@ -72,8 +72,9 @@ The `▶` marker shows which pane owns keyboard input.
 - Press `[` or `]` to jump directly between sessions needing attention.
 - Press `?` at any time for the complete shortcut reference.
 
-When a live terminal is focused, `Ctrl+F` toggles full screen and `Ctrl+E`
-widens the pane. Mouse-wheel scrollback shows how many lines you are above the
+When a live terminal is focused, `Ctrl+F` toggles full screen. `Ctrl+Alt+-`
+makes the detail pane narrower and `Ctrl+Alt++` makes it wider from either side
+of the split. Mouse-wheel scrollback shows how many lines you are above the
 live output.
 
 ### Keys
@@ -82,6 +83,7 @@ live output.
 |---|---|
 | `Enter` | Attach or resume the selected session |
 | `Tab` | Switch between the session list and live terminal |
+| `Ctrl+Alt+-` / `Ctrl+Alt++` | Resize the detail or terminal pane |
 | `[` / `]` | Previous / next session needing attention |
 | `j` / `k`, arrows | Move through sessions |
 | `g` / `G` | First / last session |
@@ -92,6 +94,7 @@ live output.
 | `a` | Toggle recent and all sessions |
 | `n` | Compose a new interactive session |
 | `d` | Compose a headless task dispatch |
+| `R` / `L` | Retry the selected dispatch / open its run log |
 | `s` / `S` | Summarise one / all visible sessions |
 | `x` | Confirm and kill the selected tmux session |
 | `r` | Refresh |
@@ -121,12 +124,12 @@ Left/Right to select an agent, `Tab` to move to the directory, and Up/Down to
 choose a recent project.
 
 Press `d` to run a task headlessly. Its composer keeps the session list visible
-and makes the task, agent, and directory explicit:
+and preserves the draft until launch succeeds:
 
-- `Tab` or `Shift+Tab` moves between fields.
-- Left/Right changes the agent.
+- `Enter` adds a task line; `Ctrl+Enter` or `Alt+Enter` opens the review screen.
+- `Tab` or `Shift+Tab` moves between the task and directory.
 - Up/Down selects a recent project directory.
-- A leading `@claude`, `@codex`, or `@copilot` overrides the selected agent.
+- A leading `@claude`, `@codex`, or `@copilot` is the only agent selector; without one, Orbit uses the selected session's agent.
 
 For example:
 
@@ -134,8 +137,10 @@ For example:
 @codex can you check feature X?
 ```
 
-A dispatch appears in the normal session list and survives quitting Orbit.
-Attach to take it over interactively, or press `x` to stop its tmux session.
+A dispatch appears in the normal session list immediately and survives quitting
+Orbit. Its detail view shows timing, recent activity, and the final result.
+Attach to take it over, press `x` to cancel it, `R` to retry it, or `L` to read
+the complete run log.
 
 Claude dispatches stop and show `▲` when a tool needs approval; Orbit does not
 approve it for you. Codex and Copilot do not expose an approval channel in

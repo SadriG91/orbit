@@ -462,7 +462,7 @@ func TestWheelDoesNotBecomeSessionNavigationAfterTab(t *testing.T) {
 	}
 }
 
-func TestFocusedTerminalCanWidenAndZoom(t *testing.T) {
+func TestFocusedTerminalCanResizeAndZoom(t *testing.T) {
 	m := newTestModel(testConfig(), attachInline)
 	m.w, m.h = 100, 30
 	m.embedded, m.embeddedName, m.embeddedCwd = "cx-work", "new codex", "/work"
@@ -471,14 +471,12 @@ func TestFocusedTerminalCanWidenAndZoom(t *testing.T) {
 	f.render = "codex terminal"
 	m.stream = f
 
-	_, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
-	if !m.terminalWide || cmd == nil {
-		t.Fatal("Ctrl+E did not widen and resize the terminal pane")
+	_, before, _ := m.dashboardPaneSizes()
+	_, cmd := m.Update(tea.KeyPressMsg{Code: '+', Mod: tea.ModCtrl | tea.ModAlt})
+	if m.detailWidth != before+detailResizeStep || cmd == nil {
+		t.Fatal("Ctrl+Alt++ did not resize while the terminal owned input")
 	}
 	m.Update(cmd())
-	if f.w != 65 || f.h != 23 {
-		t.Errorf("wide pane = %dx%d, want 65x23", f.w, f.h)
-	}
 
 	_, cmd = m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 	if !m.terminalZoom || cmd == nil {
@@ -495,6 +493,67 @@ func TestFocusedTerminalCanWidenAndZoom(t *testing.T) {
 	if got := lipgloss.Height(m.render()); got != 30 {
 		t.Errorf("zoomed frame is %d rows, want 30", got)
 	}
+}
+
+func TestDetailPaneCanWidenWhileSessionsOwnFocus(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 100, 30
+	m.embedded, m.embeddedName, m.embeddedCwd = "cx-work", "codex", "/work"
+	m.terminalFocused = false
+	f := newFakePane(m.embedded)
+	m.stream = f
+
+	normalListW, normalDetailW, _ := m.dashboardPaneSizes()
+	_, cmd := m.Update(tea.KeyPressMsg{Code: '+', Mod: tea.ModCtrl | tea.ModAlt})
+	if m.detailWidth == 0 || cmd == nil {
+		t.Fatal("+ did not widen the detail pane from Sessions focus")
+	}
+	wideListW, wideDetailW, _ := m.dashboardPaneSizes()
+	if wideListW >= normalListW || wideDetailW <= normalDetailW {
+		t.Fatalf("pane split did not change: normal=%d/%d wide=%d/%d", normalListW, normalDetailW, wideListW, wideDetailW)
+	}
+	m.Update(cmd())
+	if f.w != wideDetailW-4 {
+		t.Errorf("tmux pane width = %d, want rendered content width %d", f.w, wideDetailW-4)
+	}
+}
+
+func TestDetailResizeKeysAndClamps(t *testing.T) {
+	m := newTestModel(testConfig(), attachInline)
+	m.w, m.h = 80, 24
+
+	for _, tt := range []struct {
+		code rune
+		want int
+	}{
+		{'-', -detailResizeStep}, {'+', detailResizeStep},
+	} {
+		if got, ok := detailResizeDelta(tea.KeyPressMsg{Code: tt.code, Mod: tea.ModCtrl | tea.ModAlt}); !ok || got != tt.want {
+			t.Errorf("%c = %d,%v; want %d,true", tt.code, got, ok, tt.want)
+		}
+	}
+	if _, ok := detailResizeDelta(tea.KeyPressMsg{Code: '+', Mod: tea.ModCtrl}); ok {
+		t.Error("Ctrl++ still owns the Ghostty font-size shortcut")
+	}
+	if got, ok := detailResizeDelta(tea.KeyPressMsg{Code: '=', Text: "+", Mod: tea.ModCtrl | tea.ModAlt | tea.ModShift}); !ok || got != detailResizeStep {
+		t.Errorf("shifted + = %d,%v; want %d,true", got, ok, detailResizeStep)
+	}
+
+	for range 20 {
+		m.adjustDetailWidth(detailResizeStep)
+	}
+	listW, detailW, _ := m.dashboardPaneSizes()
+	if listW != minSessionPaneWidth || detailW != m.w-minSessionPaneWidth-1 {
+		t.Errorf("wide clamp = %d/%d", listW, detailW)
+	}
+	for range 20 {
+		m.adjustDetailWidth(-detailResizeStep)
+	}
+	listW, detailW, _ = m.dashboardPaneSizes()
+	if detailW != minDetailPaneWidth || listW != m.w-minDetailPaneWidth-1 {
+		t.Errorf("narrow clamp = %d/%d", listW, detailW)
+	}
+	assertFrameSize(t, m, m.render())
 }
 
 func TestPaneInputMapping(t *testing.T) {

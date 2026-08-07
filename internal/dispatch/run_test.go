@@ -80,6 +80,12 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"t
 	if rec.Activity != "" {
 		t.Errorf("a finished run kept activity %q", rec.Activity)
 	}
+	if len(rec.Activities) != 1 || !strings.Contains(rec.Activities[0], "go test ./...") {
+		t.Errorf("recent activity = %v, want the test command", rec.Activities)
+	}
+	if rec.Result != "tests pass" {
+		t.Errorf("result = %q, want the final response", rec.Result)
+	}
 	if !strings.Contains(log.String(), "Bash: go test ./...") {
 		t.Errorf("the tool call was not narrated:\n%s", log.String())
 	}
@@ -92,6 +98,16 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"t
 	if !strings.Contains(string(sent), `"look at feature X"`) ||
 		!strings.Contains(string(sent), `"type":"user"`) {
 		t.Errorf("prompt arrived as %s", sent)
+	}
+}
+
+func TestRememberActivityKeepsFiveDistinctRecentSteps(t *testing.T) {
+	r := &Record{}
+	for _, step := range []string{"one", "one", "two", "three", "four", "five", "six"} {
+		rememberActivity(r, step)
+	}
+	if got := strings.Join(r.Activities, ","); got != "two,three,four,five,six" {
+		t.Errorf("recent activities = %q", got)
 	}
 }
 

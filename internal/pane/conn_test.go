@@ -217,3 +217,46 @@ func TestFailedWriteLeavesNoWaiterBehind(t *testing.T) {
 		t.Error("the reply reached nobody")
 	}
 }
+
+// A remote tmux exit reaches shutdown before the UI calls Close. The logical
+// closed flag must not make resource cleanup return early: doing so leaks one
+// PTY per reconnect until macOS refuses to allocate any more.
+func TestShutdownReleasesPTY(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	c := newTestConn()
+	c.ptmx = w
+	c.shutdown()
+
+	if _, err := w.Write([]byte("still open")); err == nil {
+		t.Fatal("shutdown left the PTY descriptor open")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close after shutdown: %v", err)
+	}
+}
+
+func TestCloseReportsPTYReleaseFailure(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c := newTestConn()
+	c.ptmx = w
+	first := c.Close()
+	if first == nil {
+		t.Fatal("Close swallowed the PTY close failure")
+	}
+	if second := c.Close(); second == nil || second.Error() != first.Error() {
+		t.Errorf("second Close returned %v, want the recorded error %v", second, first)
+	}
+}
